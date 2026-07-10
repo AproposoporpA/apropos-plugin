@@ -1,28 +1,29 @@
-# Apropos Time-Recording Plugin — Implementation Plan
+# Apropos Time-Recording Plugin — Implementation Plan (Phase 1: Reliability)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Ship a public Claude Code plugin named `apropos` that records per-turn Apropos time entries by calling internal `R:` skills, so the whole team can install it via `/plugin install` + `/setup`.
+**Goal:** Ship the public `apropos` plugin so every turn reliably records (or durably queues) exactly one Apropos start-marker — never dropping time due to missing model files or a flaky `R:`/network — and roll the team onto it.
 
-**Architecture:** The public plugin is a thin orchestration shell (hooks + commands + setup). ALL business logic and the DB credential live in the internal `R:` skill layer: `Record-Turn.ps1` (dedup + backdate + person/task resolution + write) and `Resolve-Task.ps1` (org/project → task lookup). The plugin's per-turn hook is pure glue — it hands the raw turn data to the `R:` entrypoint and fails safe (exit 0) when that entrypoint is unreachable (off-network).
+**Architecture:** The credentialed write (`Record-Time.ps1` on `R:`) is **unchanged**. The plugin adds a **local** reliability layer in a bash `UserPromptSubmit` hook: always-fire with fallbacks, dedup, and a durable local pending-queue with flush/retry. The queue is local because it must survive `R:`/network outages. A `SessionStart` hook injects the per-turn convention. Manual commands and `/setup` round it out.
 
-**Tech Stack:** Bash (hook handlers, plugin tests), PowerShell 7 / pwsh (R: skill layer + its tests), JSON (`plugin.json`, `hooks.json`), Markdown (commands, convention, docs). Tests are plain assertion scripts (bash + `pwsh -File`) — **no test framework dependency** (Pester on these machines is only v3.4).
+**Tech Stack:** Bash (hook + queue lib + tests), PowerShell 7 (`Record-Time.ps1`, unchanged; invoked by the hook), JSON (`plugin.json`, `hooks.json`), Markdown (commands, convention, docs). Tests are plain bash assertion scripts — no framework. `jq` is a dev/test dependency and the runtime's preferred JSON parser (with a grep fallback).
 
 ## Global Constraints
 
-- Plugin name is exactly `apropos`. Public repo: `AproposoporpA/apropos-plugin`. Local workspace: `A:\Product Development\Program\Claude Plugin`.
-- **No credentials, no connection strings, no direct DB access in the public repo — ever.** The Apropos connection string exists only in the `R:` skill layer.
-- Skill layer path (default): `R:/Intranet/ClaudeAI/skills/work-management/time`. Overridable for tests via env `APROPOS_SKILL_DIR`.
-- Recording behavior: record on **every response**, `StartTime` **backdated 60 seconds**, **skip** when the segment key `worktype|task|project` matches the last entry **and** `< 900s` (15 min) elapsed.
-- Person resolution from Windows username: `ericbarone=321`, `joelperez=344`, `barrettgoldberg=276`, `calebbarone=1298`. Unknown username → no record.
-- Time entries are START MARKERS only — never write an end time.
-- Task resolution order: (1) explicit stated task; (2) else org/project → most-recently-active task via Apropos; (3) else record at project/org level so no time is lost.
-- Every hook exits 0 always — never block the user.
-- Frequent commits: one commit per task minimum. DRY, YAGNI, TDD.
+- Plugin name exactly `apropos`. Public repo `AproposoporpA/apropos-plugin`. Workspace `A:\Product Development\Program\Claude Plugin`.
+- **No credentials / connection strings / direct DB access in the repo — ever.** The credential lives only in `R:` `Record-Time.ps1`.
+- `Record-Time.ps1` is **not modified** in Phase 1.
+- Skill dir (default) `R:/Intranet/ClaudeAI/skills/work-management/time`; override for tests via env `APROPOS_SKILL_DIR`. Writer override for tests via env `APROPOS_WRITER`.
+- Local queue dir: `~/.claude/apropos-time/`; queue file `pending.tsv`.
+- Per-turn temp files: `/tmp/claude-timetrack/` (`description-$SID.txt`, `worktype-$SID.txt`, `task-$SID.txt`, `project-$SID.txt`, `last-entry-$SID.txt`).
+- Recording: **always fire (or queue) one entry per turn.** Description = model file if non-empty else the user's prompt text (≤500 chars) else a session placeholder. Worktype = model file if numeric else `13`. `StartTime` backdated 60s. Dedup skips only when segment key `worktype|task|project` equals the last entry's **and** < 900s elapsed — dedup never causes a *lost* entry, only prevents a near-duplicate.
+- Person IDs: `ericbarone=321, joelperez=344, barrettgoldberg=276, calebbarone=1298`. Unknown username → cannot attribute → no record (this is not a transient failure).
+- Every hook exits 0 always.
+- One commit per task. DRY, YAGNI, TDD.
 
 ---
 
-### Task 1: Plugin manifest + repo skeleton
+### Task 1: Plugin manifest + test harness
 
 **Files:**
 - Create: `.claude-plugin/plugin.json`
@@ -30,20 +31,19 @@
 - Create: `tests/test-manifest.sh`
 
 **Interfaces:**
-- Produces: a valid plugin manifest with `name: "apropos"`; `tests/helpers.sh` exposing bash functions `assert_eq <expected> <actual> <msg>`, `assert_contains <haystack> <needle> <msg>`, `pass <msg>`, and a trap that prints `ALL TESTS PASSED` / `TESTS FAILED` and sets exit code.
+- Produces: manifest with `name: "apropos"`; `tests/helpers.sh` exposing `assert_eq`, `assert_contains`, `assert_not_contains`, `pass`, and `finish` (sets exit code from `$_TEST_FAILS`).
 
 - [ ] **Step 1: Write the failing test**
 
 `tests/helpers.sh`:
 ```bash
 #!/usr/bin/env bash
-# Minimal assertion helpers. Source this at the top of every test.
 _TEST_FAILS=0
-assert_eq()       { if [[ "$1" == "$2" ]]; then echo "  ok: $3"; else echo "  FAIL: $3 (expected '$1', got '$2')"; _TEST_FAILS=$((_TEST_FAILS+1)); fi; }
-assert_contains() { if [[ "$1" == *"$2"* ]]; then echo "  ok: $3"; else echo "  FAIL: $3 ('$2' not in output)"; _TEST_FAILS=$((_TEST_FAILS+1)); fi; }
+assert_eq()          { if [[ "$1" == "$2" ]]; then echo "  ok: $3"; else echo "  FAIL: $3 (expected '$1' got '$2')"; _TEST_FAILS=$((_TEST_FAILS+1)); fi; }
+assert_contains()    { if [[ "$1" == *"$2"* ]]; then echo "  ok: $3"; else echo "  FAIL: $3 ('$2' not found)"; _TEST_FAILS=$((_TEST_FAILS+1)); fi; }
 assert_not_contains(){ if [[ "$1" != *"$2"* ]]; then echo "  ok: $3"; else echo "  FAIL: $3 ('$2' unexpectedly present)"; _TEST_FAILS=$((_TEST_FAILS+1)); fi; }
-pass()            { echo "  ok: $1"; }
-finish()          { if (( _TEST_FAILS > 0 )); then echo "TESTS FAILED ($_TEST_FAILS)"; exit 1; else echo "ALL TESTS PASSED"; exit 0; fi; }
+pass()               { echo "  ok: $1"; }
+finish()             { if (( _TEST_FAILS > 0 )); then echo "TESTS FAILED ($_TEST_FAILS)"; exit 1; else echo "ALL TESTS PASSED"; exit 0; fi; }
 ```
 
 `tests/test-manifest.sh`:
@@ -51,356 +51,162 @@ finish()          { if (( _TEST_FAILS > 0 )); then echo "TESTS FAILED ($_TEST_FA
 #!/usr/bin/env bash
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$DIR/tests/helpers.sh"
-MANIFEST="$DIR/.claude-plugin/plugin.json"
-
-[[ -f "$MANIFEST" ]] && pass "plugin.json exists" || { echo "  FAIL: plugin.json missing"; _TEST_FAILS=1; }
-jq empty "$MANIFEST" 2>/dev/null && pass "plugin.json is valid JSON" || { echo "  FAIL: invalid JSON"; _TEST_FAILS=$((_TEST_FAILS+1)); }
-NAME="$(jq -r '.name' "$MANIFEST" 2>/dev/null)"
-assert_eq "apropos" "$NAME" "manifest name is 'apropos'"
-# No secrets anywhere in the repo tree (belt-and-suspenders)
-if grep -rniE 'password|connectionstring|ClaudeAI2026|claudeaproposreadonly' "$DIR" --include='*.json' --include='*.sh' --include='*.md' -l 2>/dev/null | grep -v 'docs/superpowers'; then
-  echo "  FAIL: possible secret found in repo"; _TEST_FAILS=$((_TEST_FAILS+1));
-else pass "no secrets in json/sh/md (outside docs)"; fi
+M="$DIR/.claude-plugin/plugin.json"
+[[ -f "$M" ]] && pass "plugin.json exists" || { echo "  FAIL: missing"; _TEST_FAILS=$((_TEST_FAILS+1)); }
+jq empty "$M" 2>/dev/null && pass "valid JSON" || { echo "  FAIL: invalid JSON"; _TEST_FAILS=$((_TEST_FAILS+1)); }
+assert_eq "apropos" "$(jq -r '.name' "$M" 2>/dev/null)" "name is apropos"
+if grep -rniE 'ClaudeAI2026|claudeaproposreadonly|password=|connectionstring' "$DIR" --include='*.json' --include='*.sh' --include='*.md' -l 2>/dev/null | grep -v '/docs/'; then
+  echo "  FAIL: possible secret in repo"; _TEST_FAILS=$((_TEST_FAILS+1));
+else pass "no secrets outside docs"; fi
 finish
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `bash tests/test-manifest.sh`
-Expected: FAIL — "plugin.json missing".
-
-- [ ] **Step 3: Write minimal implementation**
-
-`.claude-plugin/plugin.json`:
+- [ ] **Step 2: Run to verify it fails** — `bash tests/test-manifest.sh` → FAIL (missing).
+- [ ] **Step 3: Implement** — `.claude-plugin/plugin.json`:
 ```json
 {
   "name": "apropos",
-  "description": "Records per-turn Apropos time entries by calling internal RICO skills. Team time-tracking rollout vehicle. Contains no credentials; all DB access lives in the internal R: skill layer.",
+  "description": "Reliable per-turn Apropos time recording with a local durable queue. Calls the internal RICO write skill; contains no credentials.",
   "version": "0.1.0",
   "author": { "name": "AproposoporpA" }
 }
 ```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `bash tests/test-manifest.sh`
-Expected: `ALL TESTS PASSED`.
-
+- [ ] **Step 4: Run to verify it passes** — `bash tests/test-manifest.sh` → ALL TESTS PASSED.
 - [ ] **Step 5: Commit**
-
 ```bash
 git add .claude-plugin/plugin.json tests/helpers.sh tests/test-manifest.sh
-git commit -m "feat: add apropos plugin manifest and test harness"
+git commit -m "feat: add apropos manifest and bash test harness"
 ```
 
 ---
 
-### Task 2 (R: skill layer): `Record-Turn.ps1` — dedup + backdate orchestrator
-
-**Location:** internal skill layer `R:/Intranet/ClaudeAI/skills/work-management/time/` (NOT the public repo). Tests live beside it on `R:`.
+### Task 2: Durable queue library (`lib/queue.sh`)
 
 **Files:**
-- Create: `R:/Intranet/ClaudeAI/skills/work-management/time/Record-Turn.ps1`
-- Create: `R:/Intranet/ClaudeAI/skills/work-management/time/tests/Record-Turn.Tests.ps1`
+- Create: `hooks-handlers/lib/queue.sh`
+- Create: `tests/test-queue.sh`
 
 **Interfaces:**
-- Consumes: existing `Record-Time.ps1` (writer). Injectable for tests via `-WriterScript` (default `Record-Time.ps1` in the same dir) and `-Resolver` (default `Resolve-Task.ps1`, added in Task 3).
-- Produces: `Record-Turn.ps1` params `-SessionId <string> -TrackDir <path> -Username <string>`. Reads `description-$SessionId.txt` (required), `worktype-$SessionId.txt` (required numeric), `task-$SessionId.txt` / `project-$SessionId.txt` (optional, sticky), `last-entry-$SessionId.txt` (dedup state). Returns object `{ Action = 'fired'|'skipped-dedup'|'skipped-nodesc'|'skipped-noworktype'|'skipped-nouser'; StartTimeUtc; SegmentKey }`. Backdates StartTime 60s. On fire, deletes the description + worktype files and rewrites `last-entry`; on dedup-skip, still deletes description + worktype files.
+- Produces:
+  - `q_enqueue <queuefile> <person> <desc> <worktype> <task> <project> <startUtc>` — appends one TSV line; description base64-encoded (safe for tabs/newlines).
+  - `q_flush <queuefile> <write_cb>` — for each line oldest-first, decode desc and call `write_cb person desc worktype task project startUtc`; on success drop the line; on first failure, stop and retain that line and all remaining (preserving order); rewrite the file; delete it if empty. Returns 0 always.
+- `write_cb` contract: a shell command/function taking `person desc worktype task project startUtc`, returning 0 on delivery success, non-zero on failure.
 
 - [ ] **Step 1: Write the failing test**
 
-`R:/Intranet/ClaudeAI/skills/work-management/time/tests/Record-Turn.Tests.ps1`:
-```powershell
-$ErrorActionPreference = 'Stop'
-$here    = Split-Path -Parent $PSScriptRoot
-$script  = Join-Path $here 'Record-Turn.ps1'
-$fails   = 0
-function Assert($cond,$msg){ if($cond){ "  ok: $msg" } else { "  FAIL: $msg"; $script:fails++ } }
-
-# Test harness: a mock writer that logs its args instead of hitting the DB.
-$work = Join-Path ([IO.Path]::GetTempPath()) ("rt-" + [guid]::NewGuid())
-New-Item -ItemType Directory -Path $work | Out-Null
-$log  = Join-Path $work 'writer.log'
-$mockWriter = Join-Path $work 'mock-writer.ps1'
-@'
-param($PersonID,$Description,$TaskID=0,$ProjectID=0,$WorkTypeID=0,$EventTypeID=0,$StartTimeUTC="")
-"$PersonID|$Description|$TaskID|$ProjectID|$WorkTypeID|$StartTimeUTC" | Out-File -Append -FilePath $env:WRITER_LOG
-'@ | Set-Content $mockWriter
-$env:WRITER_LOG = $log
-# Mock resolver that echoes back nothing (no task resolution in these tests)
-$mockResolver = Join-Path $work 'mock-resolver.ps1'
-'param($Task,$Project,$Org) return 0' | Set-Content $mockResolver
-
-function NewSession {
-  $sid = [guid]::NewGuid().ToString()
-  Set-Content (Join-Path $work "description-$sid.txt") "Test work segment"
-  Set-Content (Join-Path $work "worktype-$sid.txt") "13"
-  return $sid
-}
-
-# 1. First entry fires and backdates ~60s
-$sid = NewSession
-$before = (Get-Date).ToUniversalTime()
-$r = & $script -SessionId $sid -TrackDir $work -Username 'ericbarone' -WriterScript $mockWriter -Resolver $mockResolver
-Assert ($r.Action -eq 'fired') "first turn fires"
-$logged = Get-Content $log
-Assert ($logged -match '^321\|Test work segment\|0\|0\|13\|') "writer called with person 321, worktype 13"
-$delta = ($before - [datetime]::Parse($r.StartTimeUtc)).TotalSeconds
-Assert ($delta -ge 55 -and $delta -le 120) "StartTime backdated ~60s"
-Assert (-not (Test-Path (Join-Path $work "description-$sid.txt"))) "description consumed after fire"
-
-# 2. Same segment within 15 min -> skip
-Set-Content (Join-Path $work "description-$sid.txt") "Same segment continues"
-Set-Content (Join-Path $work "worktype-$sid.txt") "13"
-Remove-Item $log
-$r2 = & $script -SessionId $sid -TrackDir $work -Username 'ericbarone' -WriterScript $mockWriter -Resolver $mockResolver
-Assert ($r2.Action -eq 'skipped-dedup') "same segment within 15min skips"
-Assert (-not (Test-Path $log)) "writer NOT called on dedup skip"
-Assert (-not (Test-Path (Join-Path $work "description-$sid.txt"))) "description still consumed on skip"
-
-# 3. Different worktype -> fires again
-Set-Content (Join-Path $work "description-$sid.txt") "Switched to docs"
-Set-Content (Join-Path $work "worktype-$sid.txt") "23"
-$r3 = & $script -SessionId $sid -TrackDir $work -Username 'ericbarone' -WriterScript $mockWriter -Resolver $mockResolver
-Assert ($r3.Action -eq 'fired') "new worktype fires new segment"
-
-# 4. Missing description -> skip
-$sid2 = [guid]::NewGuid().ToString()
-Set-Content (Join-Path $work "worktype-$sid2.txt") "13"
-$r4 = & $script -SessionId $sid2 -TrackDir $work -Username 'ericbarone' -WriterScript $mockWriter -Resolver $mockResolver
-Assert ($r4.Action -eq 'skipped-nodesc') "missing description skips"
-
-# 5. Unknown user -> skip
-$sid3 = NewSession
-$r5 = & $script -SessionId $sid3 -TrackDir $work -Username 'nobody' -WriterScript $mockWriter -Resolver $mockResolver
-Assert ($r5.Action -eq 'skipped-nouser') "unknown username skips"
-
-Remove-Item $work -Recurse -Force
-if ($fails -gt 0) { "TESTS FAILED ($fails)"; exit 1 } else { "ALL TESTS PASSED"; exit 0 }
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `pwsh -NoProfile -File "R:/Intranet/ClaudeAI/skills/work-management/time/tests/Record-Turn.Tests.ps1"`
-Expected: FAIL — `Record-Turn.ps1` not found / not runnable.
-
-- [ ] **Step 3: Write minimal implementation**
-
-`R:/Intranet/ClaudeAI/skills/work-management/time/Record-Turn.ps1`:
-```powershell
-<#
-.SYNOPSIS
-  Orchestrates one per-turn Apropos time recording: person resolution, task
-  resolution, segment dedup, 60s backdating, then delegates the write.
-  All business logic lives here (skill layer); the plugin hook is thin glue.
-#>
-param(
-  [Parameter(Mandatory=$true)][string]$SessionId,
-  [Parameter(Mandatory=$true)][string]$TrackDir,
-  [Parameter(Mandatory=$true)][string]$Username,
-  [string]$WriterScript = (Join-Path $PSScriptRoot 'Record-Time.ps1'),
-  [string]$Resolver      = (Join-Path $PSScriptRoot 'Resolve-Task.ps1')
-)
-
-$ErrorActionPreference = 'Stop'
-function Result($action, $start='', $key=''){ [pscustomobject]@{ Action=$action; StartTimeUtc=$start; SegmentKey=$key } }
-
-# 1. Person resolution
-$persons = @{ 'ericbarone'=321; 'joelperez'=344; 'barrettgoldberg'=276; 'calebbarone'=1298 }
-$u = $Username.ToLower()
-if (-not $persons.ContainsKey($u)) { return Result 'skipped-nouser' }
-$personId = $persons[$u]
-
-$descFile = Join-Path $TrackDir "description-$SessionId.txt"
-$wtFile   = Join-Path $TrackDir "worktype-$SessionId.txt"
-$taskFile = Join-Path $TrackDir "task-$SessionId.txt"
-$projFile = Join-Path $TrackDir "project-$SessionId.txt"
-$lastFile = Join-Path $TrackDir "last-entry-$SessionId.txt"
-
-# 2. Required: description
-if (-not (Test-Path $descFile) -or -not (Get-Content $descFile -Raw).Trim()) { return Result 'skipped-nodesc' }
-$desc = (Get-Content $descFile -Raw)
-if ($desc.Length -gt 500) { $desc = $desc.Substring(0,500) }
-$desc = $desc.Trim()
-
-# 3. Required: numeric worktype
-if (-not (Test-Path $wtFile)) { return Result 'skipped-noworktype' }
-$wt = (Get-Content $wtFile -Raw).Trim()
-if ($wt -notmatch '^\d+$') { return Result 'skipped-noworktype' }
-
-# 4. Optional sticky task/project
-$task = if (Test-Path $taskFile) { (Get-Content $taskFile -Raw).Trim().TrimStart('#') } else { '' }
-$proj = if (Test-Path $projFile) { (Get-Content $projFile -Raw).Trim() } else { '' }
-
-# 5. Task resolution: if no explicit task but a project/org is known, resolve.
-if (-not $task -and $proj -and (Test-Path $Resolver)) {
-  $resolved = & $Resolver -Project $proj 2>$null
-  if ($resolved -and "$resolved" -match '^\d+$' -and [int]$resolved -gt 0) { $task = "$resolved" }
-}
-
-# 6. Segment dedup
-$segKey = "$wt|$task|$proj"
-$now    = [int][double]::Parse((Get-Date -UFormat %s))
-if (Test-Path $lastFile) {
-  $line = (Get-Content $lastFile -First 1)
-  $parts = $line -split '\|', 2
-  if ($parts.Count -eq 2 -and $parts[0] -match '^\d+$' -and $parts[1] -eq $segKey) {
-    if (($now - [int]$parts[0]) -lt 900) {
-      Remove-Item $descFile, $wtFile -ErrorAction SilentlyContinue
-      return Result 'skipped-dedup' '' $segKey
-    }
-  }
-}
-
-# 7. Backdate 60s, build args, delegate the write
-$startUtc = (Get-Date).ToUniversalTime().AddSeconds(-60).ToString('yyyy-MM-dd HH:mm:ss')
-$args = @{ PersonID=$personId; Description=$desc; WorkTypeID=[int]$wt; StartTimeUTC=$startUtc }
-if ($task) { $args['TaskID'] = [int]$task } elseif ($proj) { $args['ProjectID'] = [int]$proj }
-& $WriterScript @args | Out-Null
-
-# 8. Update dedup state, consume one-shot files
-"$now|$segKey" | Set-Content $lastFile
-Remove-Item $descFile, $wtFile -ErrorAction SilentlyContinue
-return Result 'fired' $startUtc $segKey
-```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `pwsh -NoProfile -File "R:/Intranet/ClaudeAI/skills/work-management/time/tests/Record-Turn.Tests.ps1"`
-Expected: `ALL TESTS PASSED`.
-
-- [ ] **Step 5: Commit** (plan/test copy kept in repo under `skill-layer/` mirror for reference; the live script is on `R:`)
-
+`tests/test-queue.sh`:
 ```bash
-# The R: script is not in git. Commit only the reference mirror + note.
-git add docs/superpowers/plans/2026-07-10-apropos-time-plugin.md
-git commit -m "docs: record Record-Turn.ps1 skill-layer design (lives on R:)"
+#!/usr/bin/env bash
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$DIR/tests/helpers.sh"
+source "$DIR/hooks-handlers/lib/queue.sh"
+WORK="$(mktemp -d)"; QF="$WORK/pending.tsv"; LOG="$WORK/log"
+
+# base64 roundtrip incl. special chars
+q_enqueue "$QF" 321 $'Fix tab\there and "quotes"' 13 0 0 "2026-07-10 12:00:00"
+q_enqueue "$QF" 344 "Second entry" 23 29100 0 "2026-07-10 12:01:00"
+
+ok_cb(){ printf '%s|%s|%s|%s|%s|%s\n' "$1" "$2" "$3" "$4" "$5" "$6" >> "$LOG"; return 0; }
+q_flush "$QF" ok_cb
+[[ ! -f "$QF" ]] && pass "queue drained/removed on success" || { echo "  FAIL: queue remains"; _TEST_FAILS=$((_TEST_FAILS+1)); }
+L="$(cat "$LOG")"
+assert_contains "$L" '321|Fix tab	here and "quotes"|13|0|0|2026-07-10 12:00:00' "entry 1 decoded correctly (order preserved)"
+assert_contains "$L" '344|Second entry|23|29100|0|' "entry 2 delivered"
+
+# all-fail retains everything
+rm -f "$LOG"
+q_enqueue "$QF" 321 "A" 13 0 0 "t1"
+q_enqueue "$QF" 321 "B" 13 0 0 "t2"
+fail_cb(){ return 1; }
+q_flush "$QF" fail_cb
+assert_eq "2" "$(wc -l < "$QF" | tr -d ' ')" "all entries retained on total failure"
+
+# partial: first succeeds, rest fail and are retained in order
+rm -f "$QF" "$LOG"
+q_enqueue "$QF" 321 "first" 13 0 0 "t1"
+q_enqueue "$QF" 321 "second" 13 0 0 "t2"
+q_enqueue "$QF" 321 "third" 13 0 0 "t3"
+CNT="$WORK/cnt"; echo 0 > "$CNT"
+partial_cb(){ n=$(cat "$CNT"); n=$((n+1)); echo $n > "$CNT"; if [[ $n -eq 1 ]]; then printf '%s\n' "$2" >> "$LOG"; return 0; else return 1; fi; }
+q_flush "$QF" partial_cb
+assert_eq "2" "$(wc -l < "$QF" | tr -d ' ')" "2 undelivered retained after partial"
+assert_contains "$(cat "$LOG")" "first" "first delivered"
+FIRSTLINE="$(head -1 "$QF")"
+assert_contains "$FIRSTLINE" "$(printf 'second' | base64 | tr -d '\n')" "retained queue keeps order (second first)"
+
+rm -rf "$WORK"
+finish
 ```
 
----
+- [ ] **Step 2: Run to verify it fails** — `bash tests/test-queue.sh` → FAIL (queue.sh missing).
+- [ ] **Step 3: Implement** — `hooks-handlers/lib/queue.sh`:
+```bash
+#!/usr/bin/env bash
+# Durable local time-entry queue. TSV lines:
+#   person <TAB> descB64 <TAB> worktype <TAB> task <TAB> project <TAB> startUtc
+# Description is base64-encoded so it may contain tabs/newlines/quotes safely.
 
-### Task 3 (R: skill layer): `Resolve-Task.ps1` — org/project → task lookup
-
-**Location:** `R:/Intranet/ClaudeAI/skills/work-management/time/` (internal).
-
-**Files:**
-- Create: `R:/Intranet/ClaudeAI/skills/work-management/time/Resolve-Task.ps1`
-- Create: `R:/Intranet/ClaudeAI/skills/work-management/time/tests/Resolve-Task.Tests.ps1`
-
-**Interfaces:**
-- Produces: `Resolve-Task.ps1` params `-Task <int> -Project <string> -Org <string> -QueryFn <scriptblock>`. Behavior: if `$Task` > 0, return it unchanged. Else if `$Project`/`$Org` given, call `$QueryFn` (default: real Apropos query via `Invoke-Sqlcmd`-style helper reading the connection string from the local skill config) returning candidate task rows ordered by last-activity desc; return the top task ID. If zero candidates, return 0 (caller falls back to project/org level). `$QueryFn` is injectable so tests never touch the DB.
-
-- [ ] **Step 1: Write the failing test**
-
-`R:/Intranet/ClaudeAI/skills/work-management/time/tests/Resolve-Task.Tests.ps1`:
-```powershell
-$ErrorActionPreference = 'Stop'
-$here   = Split-Path -Parent $PSScriptRoot
-$script = Join-Path $here 'Resolve-Task.ps1'
-$fails  = 0
-function Assert($c,$m){ if($c){"  ok: $m"}else{"  FAIL: $m"; $script:fails++} }
-
-# Explicit task passes through, no query
-$q = { param($project,$org) throw "should not query" }
-Assert ((& $script -Task 29100 -QueryFn $q) -eq 29100) "explicit task returned unchanged"
-
-# Project with multiple candidates -> most-recent (first row)
-$q2 = { param($project,$org) @(
-  [pscustomobject]@{ TaskId=555; LastActivity='2026-07-09' },
-  [pscustomobject]@{ TaskId=222; LastActivity='2026-06-01' }
-) }
-Assert ((& $script -Project 'Acme Portal' -QueryFn $q2) -eq 555) "most-recent task chosen"
-
-# No candidates -> 0 (fallback)
-$q3 = { param($project,$org) @() }
-Assert ((& $script -Project 'Empty' -QueryFn $q3) -eq 0) "no candidates returns 0"
-
-if ($fails -gt 0) { "TESTS FAILED ($fails)"; exit 1 } else { "ALL TESTS PASSED"; exit 0 }
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `pwsh -NoProfile -File "R:/Intranet/ClaudeAI/skills/work-management/time/tests/Resolve-Task.Tests.ps1"`
-Expected: FAIL — script not found.
-
-- [ ] **Step 3: Write minimal implementation**
-
-`R:/Intranet/ClaudeAI/skills/work-management/time/Resolve-Task.ps1`:
-```powershell
-<#
-.SYNOPSIS
-  Resolves the task number to record against: explicit task wins; else the
-  most-recently-active task for the given project/org via Apropos; else 0.
-  Read logic lives in the skill layer (holds the internal credential).
-#>
-param(
-  [int]$Task = 0,
-  [string]$Project = '',
-  [string]$Org = '',
-  [scriptblock]$QueryFn = $null
-)
-$ErrorActionPreference = 'Stop'
-if ($Task -gt 0) { return $Task }
-if (-not $Project -and -not $Org) { return 0 }
-
-if (-not $QueryFn) {
-  # Real query. Connection string comes from the local skill config (R: only) —
-  # never committed. Returns candidate tasks ordered by last activity desc.
-  $QueryFn = {
-    param($project,$org)
-    . (Join-Path $PSScriptRoot 'Get-AproposConnection.ps1')  # provides $SqlConnStr
-    $sql = @"
-SELECT TOP 5 t.DisplayID AS TaskId, MAX(te.StartTime) AS LastActivity
-FROM dbo.Task t
-LEFT JOIN dbo.TimeEntry te ON te.TaskID = t.ID
-WHERE (@project = '' OR t.ProjectName = @project)
-  AND (@org = '' OR t.OrganizationName = @org)
-  AND t.Active = 1
-GROUP BY t.DisplayID
-ORDER BY LastActivity DESC
-"@
-    Invoke-AproposQuery -ConnStr $SqlConnStr -Sql $sql -Params @{ project=$project; org=$org }
-  }
+q_enqueue() {
+  local qf="$1" person="$2" desc="$3" wt="$4" task="$5" proj="$6" start="$7"
+  mkdir -p "$(dirname "$qf")" 2>/dev/null || true
+  local b64; b64=$(printf '%s' "$desc" | base64 | tr -d '\n')
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$person" "$b64" "$wt" "$task" "$proj" "$start" >> "$qf"
 }
 
-$rows = & $QueryFn $Project $Org
-if (-not $rows -or @($rows).Count -eq 0) { return 0 }
-return [int](@($rows)[0].TaskId)
+q_flush() {
+  local qf="$1" cb="$2"
+  [[ -f "$qf" ]] || return 0
+  local tmp; tmp="$(mktemp)"
+  local stopped=0
+  while IFS=$'\t' read -r person b64 wt task proj start; do
+    [[ -z "$person" ]] && continue
+    if [[ $stopped -eq 1 ]]; then
+      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$person" "$b64" "$wt" "$task" "$proj" "$start" >> "$tmp"
+      continue
+    fi
+    local desc; desc="$(printf '%s' "$b64" | base64 -d 2>/dev/null)"
+    if "$cb" "$person" "$desc" "$wt" "$task" "$proj" "$start"; then
+      :   # delivered — drop
+    else
+      stopped=1
+      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$person" "$b64" "$wt" "$task" "$proj" "$start" >> "$tmp"
+    fi
+  done < "$qf"
+  mv "$tmp" "$qf"
+  [[ -s "$qf" ]] || rm -f "$qf"
+  return 0
+}
 ```
-
-> Note: the real `$QueryFn` references `Get-AproposConnection.ps1` / `Invoke-AproposQuery` — internal helper(s) on `R:` that hold the connection string and wrap parameterized `SqlClient` access (create in this task if not present, following `Record-Time.ps1`'s connection pattern; specify columns, parameterize inputs, never `SELECT *`). Verify actual Apropos schema/table names before finalizing the SQL; adjust `dbo.Task`/`dbo.TimeEntry` and column names to match. Tests use injected `$QueryFn` and never hit the DB.
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `pwsh -NoProfile -File "R:/Intranet/ClaudeAI/skills/work-management/time/tests/Resolve-Task.Tests.ps1"`
-Expected: `ALL TESTS PASSED`.
-
+- [ ] **Step 4: Run to verify it passes** — `bash tests/test-queue.sh` → ALL TESTS PASSED.
 - [ ] **Step 5: Commit**
-
 ```bash
-git add docs/superpowers/plans/2026-07-10-apropos-time-plugin.md
-git commit -m "docs: record Resolve-Task.ps1 skill-layer design (lives on R:)"
+git add hooks-handlers/lib/queue.sh tests/test-queue.sh
+git commit -m "feat: add durable local time-entry queue with retry-preserving flush"
 ```
 
 ---
 
-### Task 4: Per-turn hook handler (thin glue)
+### Task 3: Reliability hook (`time-track-per-turn.sh`)
 
 **Files:**
 - Create: `hooks-handlers/time-track-per-turn.sh`
-- Create: `tests/mocks/mock-record-turn.ps1`
+- Create: `tests/mocks/mock-writer.sh`
 - Create: `tests/test-hook.sh`
 
 **Interfaces:**
-- Consumes: `Record-Turn.ps1` at `$APROPOS_SKILL_DIR/Record-Turn.ps1` (default skill path). Reads session files from `/tmp/claude-timetrack`.
-- Produces: hook reads `session_id` from stdin JSON (`"session_id":"..."`) with env fallback `CLAUDE_CODE_SESSION_ID`; if none → exit 0. If `Record-Turn.ps1` not found → exit 0 (off-network fail-safe). Otherwise invokes `pwsh -NoProfile -File <entry> -SessionId <sid> -TrackDir <dir> -Username <user>`. Always exit 0.
+- Consumes: `lib/queue.sh`; `Record-Time.ps1` at `$APROPOS_SKILL_DIR/Record-Time.ps1` (or `$APROPOS_WRITER` override).
+- Produces: hook reads stdin (session_id + prompt), resolves person from `$USERNAME`, computes description/worktype/task/project with fallbacks, applies dedup, enqueues the entry (backdated 60s) unless deduped, then flushes the queue. Exits 0.
+- `write_entry person desc wt task proj start`: if `$APROPOS_WRITER` set, exec it with those args; else invoke `pwsh -File $APROPOS_SKILL_DIR/Record-Time.ps1` with `-PersonID -Description -WorkTypeID -StartTimeUTC` plus `-TaskID` (if task>0) or `-ProjectID` (if project>0). Returns the writer's exit code; returns 1 if the writer/script is absent.
 
 - [ ] **Step 1: Write the failing test**
 
-`tests/mocks/mock-record-turn.ps1`:
-```powershell
-param([string]$SessionId,[string]$TrackDir,[string]$Username)
-"$SessionId|$TrackDir|$Username" | Out-File -Append -FilePath $env:HOOK_MOCK_LOG
+`tests/mocks/mock-writer.sh`:
+```bash
+#!/usr/bin/env bash
+# Logs args; fails (exit 1) while $WRITER_FAIL file exists.
+printf '%s|%s|%s|%s|%s|%s\n' "$1" "$2" "$3" "$4" "$5" "$6" >> "$WRITER_LOG"
+[[ -f "$WRITER_FAIL" ]] && exit 1
+exit 0
 ```
 
 `tests/test-hook.sh`:
@@ -409,85 +215,163 @@ param([string]$SessionId,[string]$TrackDir,[string]$Username)
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$DIR/tests/helpers.sh"
 HOOK="$DIR/hooks-handlers/time-track-per-turn.sh"
-
 WORK="$(mktemp -d)"
-export APROPOS_SKILL_DIR="$WORK/skill"
-mkdir -p "$APROPOS_SKILL_DIR"
-cp "$DIR/tests/mocks/mock-record-turn.ps1" "$APROPOS_SKILL_DIR/Record-Turn.ps1"
-export HOOK_MOCK_LOG="$WORK/hook.log"
+export HOME="$WORK"                 # queue lands in $HOME/.claude/apropos-time
+export TMPDIR="$WORK"
+export APROPOS_WRITER="$DIR/tests/mocks/mock-writer.sh"
+export WRITER_LOG="$WORK/writer.log"
+export WRITER_FAIL="$WORK/FAIL"
 export USERNAME="ericbarone"
+chmod +x "$DIR/tests/mocks/mock-writer.sh"
+run(){ echo "$1" | bash "$HOOK"; }
 
-# 1. Valid session -> entrypoint invoked
-OUT=$(echo '{"session_id":"sess-123"}' | bash "$HOOK"; echo "rc=$?")
-assert_contains "$OUT" "rc=0" "hook exits 0 on valid session"
-LOG="$(cat "$HOOK_MOCK_LOG" 2>/dev/null || true)"
-assert_contains "$LOG" "sess-123" "entrypoint called with session id"
-assert_contains "$LOG" "ericbarone" "entrypoint called with username"
+# 1. No model files -> fallback to prompt text + worktype 13, delivered
+run '{"session_id":"s1","prompt":"Investigating the widget bug"}'
+L="$(cat "$WRITER_LOG" 2>/dev/null)"
+assert_contains "$L" "321|Investigating the widget bug|13|" "fallback prompt+wt13 recorded"
 
-# 2. No session id -> skip, entrypoint NOT called
-rm -f "$HOOK_MOCK_LOG"
-unset CLAUDE_CODE_SESSION_ID
-OUT=$(echo '{}' | bash "$HOOK"; echo "rc=$?")
-assert_contains "$OUT" "rc=0" "hook exits 0 with no session"
-[[ ! -f "$HOOK_MOCK_LOG" ]] && pass "entrypoint NOT called without session" || { echo "  FAIL: called without session"; _TEST_FAILS=$((_TEST_FAILS+1)); }
+# 2. Model files override the fallback
+rm -f "$WRITER_LOG"
+mkdir -p /tmp/claude-timetrack 2>/dev/null || true
+TT="${TMPDIR}/claude-timetrack"; mkdir -p "$TT"
+# The hook uses /tmp/claude-timetrack; redirect via env for tests:
+export APROPOS_TRACK_DIR="$TT"
+printf 'Refactored auth module' > "$TT/description-s2.txt"
+printf '50' > "$TT/worktype-s2.txt"
+run '{"session_id":"s2","prompt":"ignored because model wrote files"}'
+assert_contains "$(cat "$WRITER_LOG")" "321|Refactored auth module|50|" "model files used over prompt"
 
-# 3. Off-network (entrypoint missing) -> fail safe, exit 0
-rm -f "$APROPOS_SKILL_DIR/Record-Turn.ps1"
-OUT=$(echo '{"session_id":"sess-999"}' | bash "$HOOK"; echo "rc=$?")
-assert_contains "$OUT" "rc=0" "hook exits 0 when skill unreachable"
+# 3. Dedup: same segment within 15 min -> second not recorded
+rm -f "$WRITER_LOG"
+printf 'seg work' > "$TT/description-s3.txt"; printf '13' > "$TT/worktype-s3.txt"
+run '{"session_id":"s3","prompt":"a"}'
+printf 'seg work again' > "$TT/description-s3.txt"; printf '13' > "$TT/worktype-s3.txt"
+run '{"session_id":"s3","prompt":"b"}'
+assert_eq "1" "$(grep -c '321|' "$WRITER_LOG")" "duplicate segment recorded once"
+
+# 4. Write failure -> queued; next turn (writer restored, new worktype) -> both delivered
+rm -f "$WRITER_LOG"; touch "$WRITER_FAIL"
+printf 'will fail then queue' > "$TT/description-s4.txt"; printf '92' > "$TT/worktype-s4.txt"
+run '{"session_id":"s4","prompt":"x"}'
+[[ -f "$HOME/.claude/apropos-time/pending.tsv" ]] && pass "failed write queued locally" || { echo "  FAIL: not queued"; _TEST_FAILS=$((_TEST_FAILS+1)); }
+rm -f "$WRITER_FAIL"; rm -f "$WRITER_LOG"
+printf 'next turn' > "$TT/description-s4.txt"; printf '23' > "$TT/worktype-s4.txt"
+run '{"session_id":"s4","prompt":"y"}'
+assert_contains "$(cat "$WRITER_LOG")" "will fail then queue" "queued entry flushed on recovery"
+[[ ! -f "$HOME/.claude/apropos-time/pending.tsv" ]] && pass "queue drained after recovery" || { echo "  FAIL: queue not drained"; _TEST_FAILS=$((_TEST_FAILS+1)); }
+
+# 5. Unknown user -> nothing recorded, exit 0
+rm -f "$WRITER_LOG"; export USERNAME="stranger"
+run '{"session_id":"s5","prompt":"hello"}'; RC=$?
+assert_eq "0" "$RC" "hook exits 0 for unknown user"
+[[ ! -f "$WRITER_LOG" ]] && pass "unknown user records nothing" || { echo "  FAIL: recorded for unknown"; _TEST_FAILS=$((_TEST_FAILS+1)); }
 
 rm -rf "$WORK"
 finish
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+> Test note: the hook must honor `APROPOS_TRACK_DIR` (default `/tmp/claude-timetrack`) so tests can isolate temp files. Add that override to the implementation.
 
-Run: `bash tests/test-hook.sh`
-Expected: FAIL — hook script missing.
-
-- [ ] **Step 3: Write minimal implementation**
-
-`hooks-handlers/time-track-per-turn.sh`:
+- [ ] **Step 2: Run to verify it fails** — `bash tests/test-hook.sh` → FAIL (hook missing).
+- [ ] **Step 3: Implement** — `hooks-handlers/time-track-per-turn.sh`:
 ```bash
 #!/usr/bin/env bash
-# apropos plugin — UserPromptSubmit hook (thin glue).
-# Extracts session id, then hands raw turn data to the R: skill entrypoint,
-# which owns ALL logic (dedup, backdate, resolution, write). Fails safe.
-TRACK_DIR="/tmp/claude-timetrack"
+# apropos plugin — UserPromptSubmit reliability hook.
+# Always records (or durably queues) exactly one start-marker per turn.
+# Credentialed write stays in R: Record-Time.ps1; this layer is local so it
+# survives R:/network outages. Exits 0 always.
+set +e
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$HERE/lib/queue.sh"
+
+TRACK_DIR="${APROPOS_TRACK_DIR:-/tmp/claude-timetrack}"
 SKILL_DIR="${APROPOS_SKILL_DIR:-R:/Intranet/ClaudeAI/skills/work-management/time}"
-ENTRY="$SKILL_DIR/Record-Turn.ps1"
+QUEUE="${HOME}/.claude/apropos-time/pending.tsv"
+mkdir -p "$TRACK_DIR" "${HOME}/.claude/apropos-time" 2>/dev/null || true
 
-INPUT=$(cat 2>/dev/null || true)
-SID=$(echo "$INPUT" | grep -o '"session_id":"[^"]*"' | head -1 | sed 's/"session_id":"//;s/"$//')
-SID="${SID:-${CLAUDE_CODE_SESSION_ID:-}}"
-[[ -z "$SID" || "$SID" == "unknown" ]] && exit 0
+INPUT="$(cat 2>/dev/null || true)"
 
-# Off-network / skill not installed -> do nothing, never block.
-[[ -f "$ENTRY" ]] || exit 0
+# Parse session id + prompt (prefer jq; grep fallback for session id).
+if command -v jq >/dev/null 2>&1; then
+  SID="$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)"
+  PROMPT="$(printf '%s' "$INPUT" | jq -r '.prompt // empty' 2>/dev/null)"
+else
+  SID="$(printf '%s' "$INPUT" | grep -o '"session_id":"[^"]*"' | head -1 | sed 's/.*:"//;s/"$//')"
+  PROMPT=""
+fi
+SID="${SID:-${CLAUDE_CODE_SESSION_ID:-nosession}}"
 
-mkdir -p "$TRACK_DIR" 2>/dev/null || true
-USER_NAME="${USERNAME:-${USER:-unknown}}"
+# Person resolution (cannot record without it — not a transient failure).
+u="$(printf '%s' "${USERNAME:-${USER:-}}" | tr '[:upper:]' '[:lower:]')"
+case "$u" in
+  ericbarone) PERSON=321 ;; joelperez) PERSON=344 ;;
+  barrettgoldberg) PERSON=276 ;; calebbarone) PERSON=1298 ;;
+  *) exit 0 ;;
+esac
 
-pwsh -NoProfile -ExecutionPolicy Bypass -File "$ENTRY" \
-  -SessionId "$SID" -TrackDir "$TRACK_DIR" -Username "$USER_NAME" >/dev/null 2>&1 || true
+# write_entry callback used by q_flush.
+write_entry() {
+  if [[ -n "${APROPOS_WRITER:-}" ]]; then "$APROPOS_WRITER" "$@"; return $?; fi
+  local person="$1" desc="$2" wt="$3" task="$4" proj="$5" start="$6"
+  local entry="$SKILL_DIR/Record-Time.ps1"
+  [[ -f "$entry" ]] || return 1
+  local args=(-PersonID "$person" -Description "$desc" -WorkTypeID "$wt" -StartTimeUTC "$start")
+  if [[ -n "$task" && "$task" != "0" ]]; then args+=(-TaskID "$task")
+  elif [[ -n "$proj" && "$proj" != "0" ]]; then args+=(-ProjectID "$proj"); fi
+  pwsh -NoProfile -ExecutionPolicy Bypass -File "$entry" "${args[@]}" >/dev/null 2>&1
+}
+
+descf="$TRACK_DIR/description-$SID.txt"
+wtf="$TRACK_DIR/worktype-$SID.txt"
+taskf="$TRACK_DIR/task-$SID.txt"
+projf="$TRACK_DIR/project-$SID.txt"
+lastf="$TRACK_DIR/last-entry-$SID.txt"
+
+# Description: model file -> prompt -> placeholder. Trim to 500.
+DESC=""
+[[ -s "$descf" ]] && DESC="$(cat "$descf")"
+[[ -z "${DESC//[[:space:]]/}" && -n "$PROMPT" ]] && DESC="$PROMPT"
+[[ -z "${DESC//[[:space:]]/}" ]] && DESC="Auto-captured work (session $SID)"
+DESC="${DESC:0:500}"
+
+# Worktype: numeric model file -> default 13.
+WT="13"; [[ -s "$wtf" ]] && { v="$(tr -d '[:space:]' < "$wtf")"; [[ "$v" =~ ^[0-9]+$ ]] && WT="$v"; }
+
+# Optional sticky task/project.
+TASK="0"; [[ -s "$taskf" ]] && TASK="$(tr -d '[:space:]#' < "$taskf")"; [[ "$TASK" =~ ^[0-9]+$ ]] || TASK="0"
+PROJ="0"; [[ -s "$projf" ]] && PROJ="$(tr -d '[:space:]' < "$projf")"; [[ "$PROJ" =~ ^[0-9]+$ ]] || PROJ="0"
+
+SEG="$WT|$TASK|$PROJ"
+NOW="$(date -u +%s)"
+DEDUP=0
+if [[ -f "$lastf" ]]; then
+  line="$(head -1 "$lastf")"; lt="${line%%|*}"; lk="${line#*|}"
+  if [[ "$lt" =~ ^[0-9]+$ && "$lk" == "$SEG" && $((NOW - lt)) -lt 900 ]]; then DEDUP=1; fi
+fi
+
+# Consume one-shot model files regardless (rewritten next turn).
+rm -f "$descf" "$wtf" 2>/dev/null || true
+
+if [[ $DEDUP -eq 0 ]]; then
+  START="$(date -u -d '1 minute ago' '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date -u -v-1M '+%Y-%m-%d %H:%M:%S' 2>/dev/null)"
+  q_enqueue "$QUEUE" "$PERSON" "$DESC" "$WT" "$TASK" "$PROJ" "$START"
+  printf '%s|%s\n' "$NOW" "$SEG" > "$lastf"
+fi
+
+# Always attempt to flush (delivers this entry and any prior queued ones).
+q_flush "$QUEUE" write_entry
 exit 0
 ```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `bash tests/test-hook.sh`
-Expected: `ALL TESTS PASSED`.
-
+- [ ] **Step 4: Run to verify it passes** — `bash tests/test-hook.sh` → ALL TESTS PASSED.
 - [ ] **Step 5: Commit**
-
 ```bash
-git add hooks-handlers/time-track-per-turn.sh tests/mocks/mock-record-turn.ps1 tests/test-hook.sh
-git commit -m "feat: add thin per-turn hook handler that delegates to R: skill"
+git add hooks-handlers/time-track-per-turn.sh tests/mocks/mock-writer.sh tests/test-hook.sh
+git commit -m "feat: reliability hook — always-fire fallbacks, dedup, durable queue+flush"
 ```
 
 ---
 
-### Task 5: SessionStart convention injection
+### Task 4: SessionStart convention injection
 
 **Files:**
 - Create: `hooks-handlers/session-init.sh`
@@ -495,76 +379,55 @@ git commit -m "feat: add thin per-turn hook handler that delegates to R: skill"
 - Create: `tests/test-session-init.sh`
 
 **Interfaces:**
-- Produces: `session-init.sh` locates the plugin root via `CLAUDE_PLUGIN_ROOT` (backslash-normalized) and prints `convention.md` to stdout (Claude Code injects SessionStart stdout as context). Exits 0. `convention.md` contains the worktype ID table, the per-turn file rules, person IDs, and resolution rules.
+- Produces: `session-init.sh` resolves plugin root via `CLAUDE_PLUGIN_ROOT` (backslash-normalized; filesystem fallback) and prints `convention.md` to stdout; exits 0.
 
-- [ ] **Step 1: Write the failing test**
-
-`tests/test-session-init.sh`:
+- [ ] **Step 1: Write the failing test** — `tests/test-session-init.sh`:
 ```bash
 #!/usr/bin/env bash
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$DIR/tests/helpers.sh"
 export CLAUDE_PLUGIN_ROOT="$DIR"
-OUT=$(bash "$DIR/hooks-handlers/session-init.sh"; echo "rc=$?")
-assert_contains "$OUT" "rc=0" "session-init exits 0"
-assert_contains "$OUT" "Engineering" "convention includes worktype names"
-assert_contains "$OUT" "13" "convention includes worktype ID 13"
-assert_contains "$OUT" "description-" "convention explains per-turn description file"
-assert_contains "$OUT" "worktype-" "convention explains per-turn worktype file"
-assert_contains "$OUT" "backdated" "convention explains backdating"
-assert_not_contains "$OUT" "ClaudeAI2026" "convention contains no secret"
+OUT="$(bash "$DIR/hooks-handlers/session-init.sh"; echo rc=$?)"
+assert_contains "$OUT" "rc=0" "exits 0"
+assert_contains "$OUT" "Engineering" "has worktype names"
+assert_contains "$OUT" "description-" "explains description file"
+assert_contains "$OUT" "worktype-" "explains worktype file"
+assert_contains "$OUT" "backdate" "explains backdating"
+assert_not_contains "$OUT" "ClaudeAI2026" "no secret"
 finish
 ```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `bash tests/test-session-init.sh`
-Expected: FAIL — `session-init.sh` missing.
-
-- [ ] **Step 3: Write minimal implementation**
-
-`hooks-handlers/session-init.sh`:
+- [ ] **Step 2: Run to verify it fails** — FAIL (missing).
+- [ ] **Step 3: Implement** — `hooks-handlers/session-init.sh`:
 ```bash
 #!/usr/bin/env bash
-# apropos plugin — SessionStart hook. Injects the per-turn time-tracking
-# convention into session context (single source of truth). Exits 0 always.
-P="${CLAUDE_PLUGIN_ROOT:-}"
-P="${P//\\//}"
+# apropos plugin — SessionStart hook. Injects the per-turn convention. Exit 0.
+P="${CLAUDE_PLUGIN_ROOT:-}"; P="${P//\\//}"
 if [[ -z "$P" || ! -f "$P/hooks-handlers/convention.md" ]]; then
-  P="$(find "${HOME}/.claude/plugins" -path "*/apropos*/hooks-handlers/convention.md" 2>/dev/null | head -1 | sed 's|/hooks-handlers/convention.md$||')"
+  P="$(find "${HOME}/.claude/plugins" -path "*apropos*/hooks-handlers/convention.md" 2>/dev/null | head -1 | sed 's|/hooks-handlers/convention.md$||')"
 fi
 [[ -n "$P" && -f "$P/hooks-handlers/convention.md" ]] && cat "$P/hooks-handlers/convention.md"
 exit 0
 ```
-
-`hooks-handlers/convention.md` (full content — the injected convention):
+`hooks-handlers/convention.md`:
 ```markdown
 ## Apropos per-turn time tracking (auto-injected by the apropos plugin)
 
-Time entries are START MARKERS only — the start of a new activity ends the prior one; Apropos derives duration from the gap. Record on EVERY response; the skill backdates the start 60s and skips duplicate segments (same worktype+task/project within 15 min).
+Time entries are START MARKERS only — the start of a new activity ends the prior one; Apropos derives duration from the gap. One entry is recorded (or durably queued) EVERY turn; the plugin backdates the start 60s and skips only exact-duplicate segments (same worktype+task/project within 15 min). If you write nothing, it still records using your prompt text + worktype 13 — so ACCURACY is your job, but time is never lost.
 
 Before ending each response, write these session-keyed files in `/tmp/claude-timetrack/`:
 - `description-${CLAUDE_CODE_SESSION_ID}.txt` — one specific sentence about this turn (<=500 chars). Rewrite every turn.
 - `worktype-${CLAUDE_CODE_SESSION_ID}.txt` — one numeric worktype ID (below). Rewrite every turn.
-- `task-${CLAUDE_CODE_SESSION_ID}.txt` — Intervals/Apropos task display ID (strip `#`). Sticky; write once when known.
+- `task-${CLAUDE_CODE_SESSION_ID}.txt` — task display ID (strip `#`). Sticky; write once when known.
 - `project-${CLAUDE_CODE_SESSION_ID}.txt` — Apropos project ID. Sticky; use when no task.
-
-If only an organization or project is known, the skill resolves the task automatically (most-recently-active), falling back to project/org level so no time is lost.
 
 Worktype IDs: 7 Program Management | 13 Engineering | 18 Project Management | 19 Quality Assurance | 23 Documentation | 30 Support | 31 Estimate | 32 Training: General | 48 Admin: Business Development | 50 Architecture | 56 Admin: HR | 57 Admin: Finance | 58 Admin: Marketing | 59 Admin: Operations | 66 Office Festivities | 80 Product Management | 84 Sys Admin | 86 Testing: ALPHA | 87 Configuration | 91 Copywriting | 92 Database | 93 Design | 97 Front End Development | 102 Research & Development | 108 Technical Management | 109 Testing: BETA | 110 Testing: Browser | 117 Travel.
 
-Default fallback 13 (Engineering). SQL/proc work 92 (Database). Docs 23. Support 30. Architecture/design 50. Build/deploy/hooks/settings 84 or 87.
+Default 13 (Engineering). SQL/proc 92. Docs 23. Support 30. Architecture/design 50. Build/deploy/hooks/settings 84 or 87.
 
-Do NOT announce writing these files — it is a background convention, not a deliverable.
+Do NOT announce writing these files — background convention, not a deliverable.
 ```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `bash tests/test-session-init.sh`
-Expected: `ALL TESTS PASSED`.
-
+- [ ] **Step 4: Run to verify it passes** — ALL TESTS PASSED.
 - [ ] **Step 5: Commit**
-
 ```bash
 git add hooks-handlers/session-init.sh hooks-handlers/convention.md tests/test-session-init.sh
 git commit -m "feat: add SessionStart convention injection"
@@ -572,41 +435,25 @@ git commit -m "feat: add SessionStart convention injection"
 
 ---
 
-### Task 6: hooks.json wiring
+### Task 5: `hooks.json` wiring
 
-**Files:**
-- Create: `hooks/hooks.json`
-- Create: `tests/test-hooks-json.sh`
+**Files:** Create `hooks/hooks.json`, `tests/test-hooks-json.sh`.
 
-**Interfaces:**
-- Produces: `hooks.json` registering `UserPromptSubmit` → `time-track-per-turn.sh` and `SessionStart` → `session-init.sh`, both invoked with `bash "${CLAUDE_PLUGIN_ROOT}/hooks-handlers/<name>"`.
+**Interfaces:** registers `UserPromptSubmit`→`time-track-per-turn.sh` (timeout 15) and `SessionStart`→`session-init.sh` (timeout 10), invoked via `bash "${CLAUDE_PLUGIN_ROOT}/hooks-handlers/<name>"`.
 
-- [ ] **Step 1: Write the failing test**
-
-`tests/test-hooks-json.sh`:
+- [ ] **Step 1: Failing test** — `tests/test-hooks-json.sh`:
 ```bash
 #!/usr/bin/env bash
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-source "$DIR/tests/helpers.sh"
-H="$DIR/hooks/hooks.json"
-[[ -f "$H" ]] && pass "hooks.json exists" || { echo "  FAIL: missing"; _TEST_FAILS=1; }
-jq empty "$H" 2>/dev/null && pass "valid JSON" || { echo "  FAIL: invalid JSON"; _TEST_FAILS=$((_TEST_FAILS+1)); }
-UPS=$(jq -r '.hooks.UserPromptSubmit[0].hooks[0].command' "$H")
-SS=$(jq -r '.hooks.SessionStart[0].hooks[0].command' "$H")
-assert_contains "$UPS" "time-track-per-turn.sh" "UserPromptSubmit wired"
-assert_contains "$UPS" "CLAUDE_PLUGIN_ROOT" "UPS uses plugin root"
-assert_contains "$SS" "session-init.sh" "SessionStart wired"
+source "$DIR/tests/helpers.sh"; H="$DIR/hooks/hooks.json"
+[[ -f "$H" ]] && pass "exists" || { echo "  FAIL: missing"; _TEST_FAILS=$((_TEST_FAILS+1)); }
+jq empty "$H" 2>/dev/null && pass "valid JSON" || { echo "  FAIL: invalid"; _TEST_FAILS=$((_TEST_FAILS+1)); }
+assert_contains "$(jq -r '.hooks.UserPromptSubmit[0].hooks[0].command' "$H")" "time-track-per-turn.sh" "UPS wired"
+assert_contains "$(jq -r '.hooks.SessionStart[0].hooks[0].command' "$H")" "session-init.sh" "SessionStart wired"
 finish
 ```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `bash tests/test-hooks-json.sh`
-Expected: FAIL — missing.
-
-- [ ] **Step 3: Write minimal implementation**
-
-`hooks/hooks.json`:
+- [ ] **Step 2: Run → FAIL.**
+- [ ] **Step 3: Implement** — `hooks/hooks.json`:
 ```json
 {
   "hooks": {
@@ -619,14 +466,8 @@ Expected: FAIL — missing.
   }
 }
 ```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `bash tests/test-hooks-json.sh`
-Expected: `ALL TESTS PASSED`.
-
+- [ ] **Step 4: Run → PASS.**
 - [ ] **Step 5: Commit**
-
 ```bash
 git add hooks/hooks.json tests/test-hooks-json.sh
 git commit -m "feat: wire UserPromptSubmit and SessionStart hooks"
@@ -634,77 +475,51 @@ git commit -m "feat: wire UserPromptSubmit and SessionStart hooks"
 
 ---
 
-### Task 7: Manual commands (`/time-*`, break/lunch/out) + reference skill
+### Task 6: Manual commands + reference skill
 
-**Files:**
-- Create: `commands/time-ericb.md`, `commands/time-joelp.md`, `commands/time-barrettg.md`, `commands/time-calebb.md`
-- Create: `commands/break.md`, `commands/lunch.md`, `commands/out.md`
-- Create: `skills/time/SKILL.md` (reference copy, no credentials)
-- Create: `tests/test-commands.sh`
+**Files:** Create `commands/time-ericb.md`, `commands/time-joelp.md`, `commands/time-barrettg.md`, `commands/time-calebb.md`, `commands/break.md`, `commands/lunch.md`, `commands/out.md`, `skills/time/SKILL.md`, `tests/test-commands.sh`.
 
-**Interfaces:**
-- Produces: command markdown files that instruct calling `Record-Time.ps1` on the resolved skill dir with the correct person/EventType. Break=EventTypeID 3, Lunch=7, Out=8.
+**Interfaces:** command files instruct calling `Record-Time.ps1` with the correct person / EventTypeID (Break 3, Lunch 7, Out 8).
 
-- [ ] **Step 1: Write the failing test**
-
-`tests/test-commands.sh`:
+- [ ] **Step 1: Failing test** — `tests/test-commands.sh`:
 ```bash
 #!/usr/bin/env bash
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$DIR/tests/helpers.sh"
 for f in time-ericb time-joelp time-barrettg time-calebb break lunch out; do
-  [[ -f "$DIR/commands/$f.md" ]] && pass "command $f.md exists" || { echo "  FAIL: $f.md missing"; _TEST_FAILS=$((_TEST_FAILS+1)); }
+  [[ -f "$DIR/commands/$f.md" ]] && pass "$f.md exists" || { echo "  FAIL: $f.md"; _TEST_FAILS=$((_TEST_FAILS+1)); }
 done
-assert_contains "$(cat "$DIR/commands/lunch.md")" "7" "lunch uses EventTypeID 7"
-assert_contains "$(cat "$DIR/commands/break.md")" "3" "break uses EventTypeID 3"
-assert_contains "$(cat "$DIR/commands/out.md")" "8" "out uses EventTypeID 8"
-[[ -f "$DIR/skills/time/SKILL.md" ]] && pass "reference skill present" || { echo "  FAIL: skill missing"; _TEST_FAILS=$((_TEST_FAILS+1)); }
-assert_not_contains "$(cat "$DIR/skills/time/SKILL.md")" "ClaudeAI2026" "reference skill has no secret"
+assert_contains "$(cat "$DIR/commands/lunch.md")" "7" "lunch EventTypeID 7"
+assert_contains "$(cat "$DIR/commands/break.md")" "3" "break EventTypeID 3"
+assert_contains "$(cat "$DIR/commands/out.md")" "8" "out EventTypeID 8"
+assert_contains "$(cat "$DIR/commands/time-joelp.md")" "344" "joel person 344"
+[[ -f "$DIR/skills/time/SKILL.md" ]] && pass "reference skill" || { echo "  FAIL: skill"; _TEST_FAILS=$((_TEST_FAILS+1)); }
+assert_not_contains "$(cat "$DIR/skills/time/SKILL.md")" "ClaudeAI2026" "skill has no secret"
 finish
 ```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `bash tests/test-commands.sh`
-Expected: FAIL — command files missing.
-
-- [ ] **Step 3: Write minimal implementation**
-
-`commands/time-ericb.md` (repeat per person, changing name + ID: joelp=344, barrettg=276, calebb=1298):
+- [ ] **Step 2: Run → FAIL.**
+- [ ] **Step 3: Implement.** `commands/time-ericb.md` (repeat for joelp=344, barrettg=276, calebb=1298 — change name + ID in both the description and the `-PersonID`):
 ```markdown
 ---
 description: Record an ad-hoc Apropos time entry for Eric Barone (Person 321).
 ---
-Call the skill writer to record time for **Eric Barone (Person ID 321)**.
-
-Run (resolve skill dir; default shown):
+Record time for **Eric Barone (Person ID 321)** by running:
 `pwsh -NoProfile -File "R:/Intranet/ClaudeAI/skills/work-management/time/Record-Time.ps1" -PersonID 321 -Description "$ARGUMENTS"`
-
-If the user named a task (`#29100`), add `-TaskID 29100`. If they named a project, add `-ProjectID <id>`. If `$ARGUMENTS` is empty, summarize the current work as the description. Report success or the error.
+If a task was named (`#29100`) add `-TaskID 29100`; if a project was named add `-ProjectID <id>`. If `$ARGUMENTS` is empty, summarize the current work as the description. Report success or the error.
 ```
-
 `commands/lunch.md`:
 ```markdown
 ---
-description: Record a Lunch break (Meal Break, EventTypeID 7) for the logged-in user.
+description: Record a Lunch (Meal Break, EventTypeID 7) for the logged-in user.
 ---
-Resolve the logged-in user's Apropos Person ID from the Windows username (ericbarone=321, joelperez=344, barrettgoldberg=276, calebbarone=1298), then run immediately (no confirmation):
+Resolve the logged-in user's Person ID from the Windows username (ericbarone=321, joelperez=344, barrettgoldberg=276, calebbarone=1298), then run immediately (no confirmation):
 `pwsh -NoProfile -File "R:/Intranet/ClaudeAI/skills/work-management/time/Record-Time.ps1" -PersonID <id> -Description "Lunch" -EventTypeID 7`
 ```
-
-`commands/break.md` — identical to lunch.md but `-Description "Break" -EventTypeID 3` and description text "a Rest Break (EventTypeID 3)".
-
-`commands/out.md` — identical but `-Description "Out" -EventTypeID 8` and "Shift End (EventTypeID 8)".
-
-`skills/time/SKILL.md` — copy the existing `time` SKILL.md verbatim EXCEPT remove any lines exposing the connection string/credentials (there are none in the current SKILL.md — verify). This is a usage reference only.
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `bash tests/test-commands.sh`
-Expected: `ALL TESTS PASSED`.
-
+`commands/break.md` — same as lunch.md with `-Description "Break" -EventTypeID 3` and text "Rest Break (EventTypeID 3)".
+`commands/out.md` — same with `-Description "Out" -EventTypeID 8` and text "Shift End (EventTypeID 8)".
+`skills/time/SKILL.md` — copy the current `time` SKILL.md verbatim (it contains no credentials; verify). Usage reference only.
+- [ ] **Step 4: Run → PASS.**
 - [ ] **Step 5: Commit**
-
 ```bash
 git add commands/ skills/ tests/test-commands.sh
 git commit -m "feat: add manual /time-* and break/lunch/out commands + reference skill"
@@ -712,166 +527,109 @@ git commit -m "feat: add manual /time-* and break/lunch/out commands + reference
 
 ---
 
-### Task 8: `/setup` command + install script
+### Task 7: `/setup` command + install script
 
-**Files:**
-- Create: `setup/setup.sh`
-- Create: `commands/setup.md`
-- Create: `tests/test-setup.sh`
+**Files:** Create `setup/setup.sh`, `commands/setup.md`, `tests/test-setup.sh`.
 
-**Interfaces:**
-- Produces: `setup.sh` that, given `HOME` (respects `$HOME`), ensures `settings.json` contains the plugin's hooks are enabled (Claude Code auto-loads plugin `hooks.json`, so setup's real job is: verify the plugin is installed, back up `settings.json` before any edit, and — if a legacy `time-track.sh`/hand-pasted convention block exists in the user's `CLAUDE.md` — offer to remove it). Idempotent. Prints `SETUP OK`.
+**Interfaces:** `setup.sh` (respects `$HOME`): if `--remove-legacy` and the user's `CLAUDE.md` contains the legacy per-turn block marker, back it up (`CLAUDE.md.bak-<ts>`) and remove the block (marker line through the line before the next `## ` heading). Idempotent. Prints `SETUP OK`. Also warns if `jq` is missing (runtime prefers it).
 
-- [ ] **Step 1: Write the failing test**
-
-`tests/test-setup.sh`:
+- [ ] **Step 1: Failing test** — `tests/test-setup.sh`:
 ```bash
 #!/usr/bin/env bash
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$DIR/tests/helpers.sh"
-WORK="$(mktemp -d)"; export HOME="$WORK"
-mkdir -p "$HOME/.claude"
+WORK="$(mktemp -d)"; export HOME="$WORK"; mkdir -p "$HOME/.claude"
 cat > "$HOME/.claude/CLAUDE.md" <<'EOF'
 # User
 ## Time tracking - per-turn Apropos convention
 old hand-pasted block
 ## Keep me
 EOF
-# First run: removes legacy block, backs up
-OUT=$(bash "$DIR/setup/setup.sh" --remove-legacy; echo "rc=$?")
-assert_contains "$OUT" "rc=0" "setup exits 0"
-assert_contains "$OUT" "SETUP OK" "setup reports OK"
+OUT="$(bash "$DIR/setup/setup.sh" --remove-legacy; echo rc=$?)"
+assert_contains "$OUT" "rc=0" "exits 0"
+assert_contains "$OUT" "SETUP OK" "reports OK"
 MD="$(cat "$HOME/.claude/CLAUDE.md")"
 assert_not_contains "$MD" "old hand-pasted block" "legacy block removed"
-assert_contains "$MD" "Keep me" "unrelated content preserved"
-ls "$HOME/.claude/"CLAUDE.md.bak-* >/dev/null 2>&1 && pass "CLAUDE.md backed up" || { echo "  FAIL: no backup"; _TEST_FAILS=$((_TEST_FAILS+1)); }
-# Second run: idempotent (no legacy block now)
-OUT2=$(bash "$DIR/setup/setup.sh" --remove-legacy; echo "rc=$?")
-assert_contains "$OUT2" "SETUP OK" "second run idempotent"
-rm -rf "$WORK"
-finish
+assert_contains "$MD" "Keep me" "unrelated content kept"
+ls "$HOME/.claude/"CLAUDE.md.bak-* >/dev/null 2>&1 && pass "backup made" || { echo "  FAIL: no backup"; _TEST_FAILS=$((_TEST_FAILS+1)); }
+OUT2="$(bash "$DIR/setup/setup.sh" --remove-legacy)"
+assert_contains "$OUT2" "SETUP OK" "idempotent second run"
+rm -rf "$WORK"; finish
 ```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `bash tests/test-setup.sh`
-Expected: FAIL — `setup.sh` missing.
-
-- [ ] **Step 3: Write minimal implementation**
-
-`setup/setup.sh`:
+- [ ] **Step 2: Run → FAIL.**
+- [ ] **Step 3: Implement** — `setup/setup.sh`:
 ```bash
 #!/usr/bin/env bash
-# apropos plugin /setup. Backs up and removes any legacy hand-pasted per-turn
-# time-tracking block from the user's CLAUDE.md (the plugin now injects it via
-# SessionStart). Idempotent. Hook loading itself is handled by Claude Code from
-# the plugin's hooks.json, so no settings.json edit is required.
+# apropos /setup: remove any legacy hand-pasted per-turn block from CLAUDE.md
+# (the plugin now injects the convention via SessionStart). Idempotent.
 set -euo pipefail
-CLAUDE_MD="${HOME}/.claude/CLAUDE.md"
-REMOVE_LEGACY=0
-[[ "${1:-}" == "--remove-legacy" ]] && REMOVE_LEGACY=1
-
+MD="${HOME}/.claude/CLAUDE.md"
 MARKER="## Time tracking - per-turn Apropos convention"
-if [[ $REMOVE_LEGACY -eq 1 && -f "$CLAUDE_MD" ]] && grep -qF "$MARKER" "$CLAUDE_MD"; then
-  cp "$CLAUDE_MD" "${CLAUDE_MD}.bak-$(date +%Y%m%d-%H%M%S)"
-  # Delete from the marker line up to (but not including) the next top-level "## " heading.
-  awk -v m="$MARKER" '
-    $0==m {skip=1; next}
-    skip==1 && /^## / {skip=0}
-    skip==1 {next}
-    {print}
-  ' "$CLAUDE_MD" > "${CLAUDE_MD}.tmp" && mv "${CLAUDE_MD}.tmp" "$CLAUDE_MD"
+if [[ "${1:-}" == "--remove-legacy" && -f "$MD" ]] && grep -qF "$MARKER" "$MD"; then
+  cp "$MD" "${MD}.bak-$(date +%Y%m%d-%H%M%S)"
+  awk -v m="$MARKER" '$0==m{skip=1;next} skip==1&&/^## /{skip=0} skip==1{next} {print}' "$MD" > "${MD}.tmp" && mv "${MD}.tmp" "$MD"
   echo "Removed legacy per-turn block from CLAUDE.md (backup saved)."
 fi
+command -v jq >/dev/null 2>&1 || echo "WARN: jq not found — install it for best prompt-fallback fidelity."
 echo "SETUP OK"
 ```
-
 `commands/setup.md`:
 ```markdown
 ---
 description: Set up the apropos time-tracking plugin for this user.
 ---
-Run the setup script to clean up any legacy hand-pasted time-tracking block (the plugin now injects the convention automatically each session):
-`bash "${CLAUDE_PLUGIN_ROOT}/setup/setup.sh" --remove-legacy`
-Then tell the user to restart Claude Code so the SessionStart injection and hooks load. Confirm the `apropos` plugin shows in `/plugin`.
+Run: `bash "${CLAUDE_PLUGIN_ROOT}/setup/setup.sh" --remove-legacy`
+Then tell the user to restart Claude Code so the hooks + SessionStart injection load, and confirm `apropos` appears in `/plugin`.
 ```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `bash tests/test-setup.sh`
-Expected: `ALL TESTS PASSED`.
-
+- [ ] **Step 4: Run → PASS.**
 - [ ] **Step 5: Commit**
-
 ```bash
 git add setup/setup.sh commands/setup.md tests/test-setup.sh
-git commit -m "feat: add /setup command that removes legacy CLAUDE.md blocks idempotently"
+git commit -m "feat: add idempotent /setup that removes legacy CLAUDE.md block"
 ```
 
 ---
 
-### Task 9: README, run-all test script, and full-suite green
+### Task 8: README + full-suite runner
 
-**Files:**
-- Create: `README.md`
-- Create: `tests/run-all.sh`
+**Files:** Create `README.md`, `tests/run-all.sh`.
 
-**Interfaces:**
-- Produces: `run-all.sh` running every `tests/test-*.sh` and reporting aggregate pass/fail; README documenting install (`/plugin marketplace add AproposoporpA/apropos-plugin`, `/plugin install apropos`, `/setup`), the security model, and the `R:` skill-layer dependency.
-
-- [ ] **Step 1: Write the failing test**
-
-`tests/run-all.sh`:
+- [ ] **Step 1: Add runner** — `tests/run-all.sh`:
 ```bash
 #!/usr/bin/env bash
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-rc=0
-for t in "$DIR"/tests/test-*.sh; do
-  echo "== $(basename "$t") =="
-  bash "$t" || rc=1
-done
-[[ $rc -eq 0 ]] && echo "SUITE GREEN" || echo "SUITE RED"
-exit $rc
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; rc=0
+for t in "$DIR"/tests/test-*.sh; do echo "== $(basename "$t") =="; bash "$t" || rc=1; done
+[[ $rc -eq 0 ]] && echo "SUITE GREEN" || echo "SUITE RED"; exit $rc
 ```
-
-- [ ] **Step 2: Run test to verify current state**
-
-Run: `bash tests/run-all.sh`
-Expected: `SUITE GREEN` (all prior task tests pass; README existence not yet asserted).
-
-- [ ] **Step 3: Write minimal implementation**
-
-`README.md`:
+- [ ] **Step 2: Run** — `bash tests/run-all.sh` → `SUITE GREEN` (all Task 1–7 tests pass).
+- [ ] **Step 3: Implement README** — `README.md`:
 ```markdown
-# apropos — Apropos time-recording plugin
+# apropos — reliable Apropos time recording
 
-Records per-turn Apropos time entries for RICO team members.
+Records one Apropos start-marker every turn, with fallbacks and a durable local queue so time is never lost to a missing description or a flaky network.
 
 ## Install
 1. `/plugin marketplace add AproposoporpA/apropos-plugin`
 2. `/plugin install apropos`
-3. `/setup`  (removes any legacy hand-pasted CLAUDE.md block)
+3. `/setup`
 4. Restart Claude Code.
 
-## How it works
-- A `UserPromptSubmit` hook records one start-marker per turn (backdated 60s), skipping duplicate segments (<15 min).
-- A `SessionStart` hook injects the per-turn convention (worktype IDs, file rules).
-- Manual commands: `/time-ericb`, `/time-joelp`, `/time-barrettg`, `/time-calebb`, `/break`, `/lunch`, `/out`.
+## Reliability
+- Always records (or queues) one entry per turn — no model files needed (falls back to your prompt text + worktype 13).
+- Backdates the start 60s; skips only exact-duplicate segments (<15 min).
+- If the write fails or `R:`/network is down, the entry is queued locally (`~/.claude/apropos-time/`) and flushed on a later turn.
 
 ## Security
-This public plugin contains **no credentials and no direct database access.** All DB logic and the Apropos connection string live in the internal `R:` skill layer (`R:/Intranet/ClaudeAI/skills/work-management/time`), reachable only on the RICO network. Off-network, the plugin does nothing (fails safe). Downloading this repo does not grant the ability to write to Apropos.
+No credentials or database access ship in this repo. The credentialed write lives only in the internal `R:` skill (`Record-Time.ps1`), reachable on the RICO network. Off-network entries queue and flush later; a downloaded copy of this plugin cannot write to Apropos.
+
+## Commands
+`/time-ericb`, `/time-joelp`, `/time-barrettg`, `/time-calebb`, `/break`, `/lunch`, `/out`, `/setup`.
 ```
-
-- [ ] **Step 4: Run the full suite**
-
-Run: `bash tests/run-all.sh`
-Expected: `SUITE GREEN`.
-
-- [ ] **Step 5: Commit**
-
+- [ ] **Step 4: Run full suite** — `bash tests/run-all.sh` → `SUITE GREEN`.
+- [ ] **Step 5: Commit & push**
 ```bash
 git add README.md tests/run-all.sh
-git commit -m "docs: add README and full test-suite runner"
+git commit -m "docs: add README and full-suite test runner"
 git push
 ```
 
@@ -879,26 +637,21 @@ git push
 
 ## Self-Review
 
-**1. Spec coverage:**
-- Purpose / team rollout → Task 9 (README install), Task 8 (`/setup`). ✔
-- Security model (no secrets, R: gate, off-network fail-safe) → Task 1 (secret scan), Task 4 (fail-safe test), Task 9 (README). ✔
-- Thin-shell / logic-in-skill → Tasks 2–3 (R: logic) vs Task 4 (thin hook). ✔
-- Recording behavior (every turn, 60s backdate, dedup) → Task 2. ✔
-- Resolution rules (person / task / org / project fallback) → Task 2 (person), Task 3 (task/org/project). ✔
-- SessionStart convention delivery → Task 5. ✔
-- Commands + break/lunch/out → Task 7. ✔
-- Distribution / marketplace → Task 9. ✔
-- Testing (dedup, backdate, off-network, setup idempotency, injection) → Tasks 2,4,8,5. ✔
+**1. Spec coverage:** Reliability/always-fire → Task 3 (fallbacks) + Task 2 (queue). Silent-skip fixes: (1)(2) desc/worktype fallback → Task 3; (3)(4) network/timeout → Task 2 queue + Task 3 flush; (5) session→`nosession`, unknown user handled → Task 3. Backdate/dedup → Task 3. SessionStart convention → Task 4. hooks wiring → Task 5. Commands → Task 6. `/setup` → Task 7. Distribution/README → Task 8. Security (no secrets) → Task 1 scan + Task 8 README. ✔
 
-**2. Placeholder scan:** No "TBD/TODO" in steps. Task 3 flags a schema-verification step for the real SQL (dbo.Task/dbo.TimeEntry names) — this is a genuine verify-against-live-DB action, not a code placeholder; injected `$QueryFn` keeps tests deterministic.
+**2. Placeholder scan:** No TBD/TODO. Phase 2 (`Resolve-Task.ps1`) is intentionally deferred below, not a placeholder within Phase 1.
 
-**3. Type consistency:** `Record-Turn.ps1` params (`-SessionId/-TrackDir/-Username/-WriterScript/-Resolver`) match Task 4's hook invocation (first three) and the mock. `Resolve-Task.ps1` (`-Task/-Project/-Org/-QueryFn`) matches Task 2's `& $Resolver -Project $proj`. EventTypeIDs (3/7/8) consistent between Task 7 and spec. Person IDs consistent throughout.
+**3. Type/interface consistency:** `q_enqueue`/`q_flush` signatures identical across Task 2 defn, tests, and Task 3 usage. `write_entry`/`write_cb` arg order `person desc wt task proj start` consistent in queue lib, mock-writer, and hook. `APROPOS_WRITER`/`APROPOS_SKILL_DIR`/`APROPOS_TRACK_DIR` used consistently between hook and test. EventTypeIDs 3/7/8 consistent. Person IDs consistent.
+
+## Phase 2 (separate, gated — not part of this plan's execution)
+
+Add `R:/Intranet/ClaudeAI/skills/work-management/time/Resolve-Task.ps1` to resolve org/project → most-recently-active task against Apropos, with an injectable query for tests (never hits the DB in test). The hook would pass a project/org hint and use the resolved task when no explicit task is set. **Gate:** verify the live Apropos schema (org/project/task tables + last-activity column) before writing the query. Deliver as its own spec-slice + plan after Phase 1 is in production.
 
 ## Execution Handoff
 
 Plan complete and saved to `docs/superpowers/plans/2026-07-10-apropos-time-plugin.md`. Two execution options:
 
-1. **Subagent-Driven (recommended)** — I dispatch a fresh subagent per task, review between tasks, fast iteration.
-2. **Inline Execution** — Execute tasks in this session with checkpoints for review.
+1. **Subagent-Driven (recommended)** — fresh subagent per task, review between tasks.
+2. **Inline Execution** — execute here with checkpoints.
 
 Which approach?
