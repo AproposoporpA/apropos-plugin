@@ -53,8 +53,8 @@ your name with a real description (worktype auto-selected).
 - If a write fails or the network blips, the entry is queued locally
   (`~/.claude/apropos-time/`) and flushed on the next turn or at next session start —
   no lost time.
-- Manual commands still available: `/time-joelp`, `/time-barrettg`, `/time-calebb`,
-  `/break`, `/lunch`, `/out`.
+- Manual commands still available: `/time <description>` (records for you — resolved
+  from your Windows login), `/break`, `/lunch`, `/out`.
 
 ## Trouble
 - No entries appearing: confirm `R:` is mapped and you're on the network; confirm

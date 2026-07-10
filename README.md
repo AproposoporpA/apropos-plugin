@@ -17,7 +17,7 @@ Records one Apropos start-marker every turn, with fallbacks and a durable local 
 No credentials or database access ship in this repo. The credentialed write lives only in the internal `R:` skill (`Record-Time.ps1`), reachable on the RICO network. Off-network entries queue and flush later; a downloaded copy of this plugin cannot write to Apropos.
 
 ## Commands
-`/time-ericb`, `/time-joelp`, `/time-barrettg`, `/time-calebb`, `/break`, `/lunch`, `/out`, `/setup`.
+`/time` (records for the logged-in user, resolved from the Windows username), `/break`, `/lunch`, `/out`, `/setup`.
 
 ## Tests
 `bash tests/run-all.sh`
