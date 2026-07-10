@@ -1,0 +1,25 @@
+# --- Secrets / local config (NEVER commit — public repo) ---
+# The Apropos connection string lives only in the R: skill layer, never here.
+*.local
+*.secret
+*config.json
+!*.example.json
+.env
+.env.*
+apropos-time.config.json
+credentials*
+connection-string*
+
+# --- Plugin runtime artifacts ---
+.in_use/
+*.bak
+*.bak-*
+
+# --- OS / editor cruft ---
+Thumbs.db
+Desktop.ini
+.DS_Store
+*.swp
+*~
+.vscode/
+.idea/
