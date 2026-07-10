@@ -1,30 +1,32 @@
 ---
 name: time
-description: Records AI coaching time entries into Apropos. Use for "/time-ericb", "/time-joelp", "/time-barrettg", "/time-calebbi", or "record time".
+description: Records time entries into Apropos for the logged-in user. Use for "/time" or "record time".
 ---
 
 # Record Time Entry
 
-Records a time entry for AI coaching work into the Apropos database using the `CLAUDE_TimeEntry_INSERT` stored procedure.
+Records a time entry into the Apropos database using the `CLAUDE_TimeEntry_INSERT` stored procedure.
 
 ## Invocation
 
-Invoke as `/time-[FirstNameLastInitial]` to record time for a specific person, or simply say "record time" and it will default to the logged-in user.
+Invoke as `/time <description>` (or say "record time"). It records for the **logged-in user**, resolved from the Windows username — you don't pick a person.
 
 > **Tool Reference:** See `R:/Intranet/ClaudeAI/tools/apropos.md` for connection details, stored procedures, and person IDs.
 
-| Command | Person | Apropos Person ID | Windows Username |
-|---------|--------|-------------------|------------------|
-| `/time-ericb` | Eric Barone | 321 | ericbarone |
-| `/time-joelp` | Joel Perez | 344 | joelperez |
-| `/time-barrettg` | Barrett Goldberg | 276 | barrettgoldberg |
-| `/time-calebb` | Caleb Barone | 1298 | calebbarone |
+Windows username → Apropos Person ID:
+
+| Person | Apropos Person ID | Windows Username |
+|--------|-------------------|------------------|
+| Eric Barone | 321 | ericbarone |
+| Joel Perez | 344 | joelperez |
+| Barrett Goldberg | 276 | barrettgoldberg |
+| Caleb Barone | 1298 | calebbarone |
 
 ## How It Works
 
 When invoked, the skill:
 
-1. Identifies the person (from the command name, or defaults to the logged-in user)
+1. Identifies the person from the logged-in Windows username
 2. Asks the user for a work description (if not provided as args)
 3. Calls the Apropos stored procedure to insert the time entry
 
@@ -52,11 +54,9 @@ Optional parameters (defaults handled by the proc):
 
 ### Step 1: Identify the Person
 
-Map the command to the person using the table above. Use the following priority:
+Default to the **logged-in user**: determine the Windows username (from the session environment, user profile path, or `$env:USERNAME`) and match it to the table above. Do not ask who to record for.
 
-1. **Explicit command:** If the user invoked via `/time-[name]`, use that person.
-2. **Named in request:** If the user said "record time for Joel", use Joel.
-3. **Default to logged-in user:** If the user just said "record time" without specifying anyone, default to the logged-in user. Determine the logged-in user by checking the Windows username (from the session environment, user profile path, or `$env:USERNAME`) and matching it to the table above. Do not ask who to record for — just default to them.
+The only exception: if the user explicitly says "record time for Joel" (naming someone else), use that person instead.
 
 **Recording for multiple people:** A user may say "record time for me and Joel" or "record time for me and Barrett". In this case, run the script once for each person with the same description.
 
@@ -64,7 +64,7 @@ If the person's ID is marked TODO, inform the user that the Apropos Person ID ne
 
 ### Step 2: Get the Work Description
 
-If the user provided a description as arguments (e.g., `/time-ericb Reviewed deployment pipeline`), use that.
+If the user provided a description as arguments (e.g., `/time Reviewed deployment pipeline`), use that.
 
 If the user says something like "whatever I'm working on" or doesn't provide a description, summarize the current conversation/task as the description. For example, if you've been helping build a new feature, use "Building payment gateway integration".
 
@@ -122,13 +122,13 @@ When Eric returns and sends the next message, the per-turn hook fires a new entr
 ## Example Session
 
 ```
-User: /time-ericb Coached Claude on deployment best practices
+User: /time Reviewed and updated the deployment pipeline
 
 Claude: Recording time entry for Eric Barone...
 
-[Runs Record-Time.ps1 -PersonID 321 -Description "Coached Claude on deployment best practices"]
+[Runs Record-Time.ps1 -PersonID 321 -Description "Reviewed and updated the deployment pipeline"]
 
 Time entry recorded for Eric Barone:
-  Description: Coached Claude on deployment best practices
+  Description: Reviewed and updated the deployment pipeline
   Timestamp: 2026-02-09 (UTC)
 ```
