@@ -6,9 +6,9 @@
 set +e
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/lib/queue.sh"
+source "$HERE/lib/writer.sh"
 
 TRACK_DIR="${APROPOS_TRACK_DIR:-/tmp/claude-timetrack}"
-SKILL_DIR="${APROPOS_SKILL_DIR:-R:/Intranet/ClaudeAI/skills/work-management/time}"
 QUEUE="${HOME}/.claude/apropos-time/pending.tsv"
 mkdir -p "$TRACK_DIR" "${HOME}/.claude/apropos-time" 2>/dev/null || true
 
@@ -31,18 +31,6 @@ case "$u" in
   barrettgoldberg) PERSON=276 ;; calebbarone) PERSON=1298 ;;
   *) exit 0 ;;
 esac
-
-# write_entry callback used by q_flush.
-write_entry() {
-  if [[ -n "${APROPOS_WRITER:-}" ]]; then "$APROPOS_WRITER" "$@"; return $?; fi
-  local person="$1" desc="$2" wt="$3" task="$4" proj="$5" start="$6"
-  local entry="$SKILL_DIR/Record-Time.ps1"
-  [[ -f "$entry" ]] || return 1
-  local args=(-PersonID "$person" -Description "$desc" -WorkTypeID "$wt" -StartTimeUTC "$start")
-  if [[ -n "$task" && "$task" != "0" ]]; then args+=(-TaskID "$task")
-  elif [[ -n "$proj" && "$proj" != "0" ]]; then args+=(-ProjectID "$proj"); fi
-  pwsh -NoProfile -ExecutionPolicy Bypass -File "$entry" "${args[@]}" >/dev/null 2>&1
-}
 
 descf="$TRACK_DIR/description-$SID.txt"
 wtf="$TRACK_DIR/worktype-$SID.txt"
