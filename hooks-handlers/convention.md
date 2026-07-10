@@ -1,6 +1,8 @@
 ## Apropos per-turn time tracking (auto-injected by the apropos plugin)
 
-Time entries are START MARKERS only — the start of a new activity ends the prior one; Apropos derives duration from the gap. One entry is recorded (or durably queued) EVERY turn; the plugin backdates the start 60s and skips only exact-duplicate segments (same worktype+task/project within 15 min). If you write nothing, it still records using your prompt text + worktype 13 — so ACCURACY is your job, but time is never lost.
+Time entries are START MARKERS only — the start of a new activity ends the prior one; Apropos derives duration from the gap. One entry is recorded (or durably queued) EVERY turn; the plugin backdates the start 60s and skips only exact-duplicate segments (same worktype+task/project within 15 min).
+
+**Writing a specific description each turn is REQUIRED, not optional.** If you don't, the entry still records — but only as a flagged placeholder `[needs description] <project>` at worktype 13, which the user then has to find and fix. That is a failure on your part. Always write a concrete description of what was actually done this turn.
 
 Before ending each response, write these session-keyed files in `/tmp/claude-timetrack/`:
 - `description-${CLAUDE_CODE_SESSION_ID}.txt` — one specific sentence about this turn (<=500 chars). Rewrite every turn.

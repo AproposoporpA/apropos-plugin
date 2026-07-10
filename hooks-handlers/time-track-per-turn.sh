@@ -14,13 +14,13 @@ mkdir -p "$TRACK_DIR" "${HOME}/.claude/apropos-time" 2>/dev/null || true
 
 INPUT="$(cat 2>/dev/null || true)"
 
-# Parse session id + prompt (prefer jq; grep fallback for session id).
+# Parse session id + cwd (prefer jq; grep fallback for session id).
 if command -v jq >/dev/null 2>&1; then
   SID="$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)"
-  PROMPT="$(printf '%s' "$INPUT" | jq -r '.prompt // empty' 2>/dev/null)"
+  CWD="$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null)"
 else
   SID="$(printf '%s' "$INPUT" | grep -o '"session_id":"[^"]*"' | head -1 | sed 's/.*:"//;s/"$//')"
-  PROMPT=""
+  CWD=""
 fi
 SID="${SID:-${CLAUDE_CODE_SESSION_ID:-nosession}}"
 
@@ -38,11 +38,19 @@ taskf="$TRACK_DIR/task-$SID.txt"
 projf="$TRACK_DIR/project-$SID.txt"
 lastf="$TRACK_DIR/last-entry-$SID.txt"
 
-# Description: model file -> prompt -> placeholder. Trim to 500.
+# Description: model-written file is the good path. If absent, use a uniformly
+# FLAGGED, project-tagged placeholder — filterable + carries context — never the
+# raw prompt (which describes the request, not the work done). Trim to 500.
 DESC=""
 [[ -s "$descf" ]] && DESC="$(cat "$descf")"
-[[ -z "${DESC//[[:space:]]/}" && -n "$PROMPT" ]] && DESC="$PROMPT"
-[[ -z "${DESC//[[:space:]]/}" ]] && DESC="Auto-captured work (session $SID)"
+if [[ -z "${DESC//[[:space:]]/}" ]]; then
+  proj="$(basename "$CWD" 2>/dev/null)"
+  if [[ -n "$proj" && "$proj" != "." && "$proj" != "/" ]]; then
+    DESC="[needs description] $proj"
+  else
+    DESC="[needs description]"
+  fi
+fi
 DESC="${DESC:0:500}"
 
 # Worktype: numeric model file -> default 13.

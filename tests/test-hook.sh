@@ -13,10 +13,11 @@ export APROPOS_TRACK_DIR="$TT"
 chmod +x "$DIR/tests/mocks/mock-writer.sh"
 run(){ echo "$1" | bash "$HOOK"; }
 
-# 1. No model files -> fallback to prompt text + worktype 13, delivered
-run '{"session_id":"s1","prompt":"Investigating the widget bug"}'
+# 1. No model files -> flagged, project-tagged placeholder + worktype 13 (NOT the prompt)
+run '{"session_id":"s1","cwd":"/home/eric/projects/apropos-plugin","prompt":"go"}'
 L="$(cat "$WRITER_LOG" 2>/dev/null)"
-assert_contains "$L" "321|Investigating the widget bug|13|" "fallback prompt+wt13 recorded"
+assert_contains "$L" "321|[needs description] apropos-plugin|13|" "fallback uses flagged placeholder + project"
+assert_not_contains "$L" "|go|" "raw prompt is NOT used as description"
 
 # 2. Model files override the fallback
 rm -f "$WRITER_LOG"
