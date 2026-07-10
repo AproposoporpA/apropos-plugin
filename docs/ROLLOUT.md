@@ -1,7 +1,21 @@
 # apropos plugin — team rollout
 
-For Joel, Barrett, and Caleb. Moves you from the legacy `time-track.sh` setup to
-the `apropos` plugin. ~2 minutes.
+## Intro
+
+Team — we've packaged our Claude Code time tracking into a proper plugin called
+**apropos**. Up to now, time recording relied on a hand-installed hook and a block
+pasted into your `CLAUDE.md`, and it quietly dropped time in a bunch of cases — if
+Claude didn't write a description that turn, if the network hiccuped, or if the write
+timed out, nothing got recorded.
+
+The plugin fixes that. It records one time entry every turn (a start-marker,
+backdated a minute, with duplicate segments skipped), and if a write ever fails it
+queues the entry locally and delivers it later — so **time doesn't get lost anymore**.
+Install is now a few slash commands instead of manual file edits, and setup cleans up
+the old hook/convention automatically so nothing double-records.
+
+Please install it when you get a minute (~2 minutes, steps below), and record your
+time to it going forward. Ping me if anything looks off.
 
 ## Prerequisites
 - On the RICO network with the `R:` drive mapped (the plugin calls the internal
