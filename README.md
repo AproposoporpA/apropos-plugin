@@ -9,7 +9,7 @@ Records one Apropos start-marker every turn, with fallbacks and a durable local 
 4. Restart Claude Code.
 
 ## Reliability
-- Always records (or queues) one entry per turn — no model files needed (falls back to your prompt text + worktype 13).
+- Always records (or queues) one entry per turn. If a specific description wasn't written, it falls back to the last assistant message from the transcript (real context), and only to a `[needs description] <project>` tag if that's unavailable.
 - Backdates the start 60s; skips only exact-duplicate segments (<15 min).
 - If the write fails or `R:`/network is down, the entry is queued locally (`~/.claude/apropos-time/`) and flushed on a later turn.
 

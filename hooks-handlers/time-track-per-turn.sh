@@ -18,11 +18,14 @@ INPUT="$(cat 2>/dev/null || true)"
 if command -v jq >/dev/null 2>&1; then
   SID="$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)"
   CWD="$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null)"
+  TRANSCRIPT="$(printf '%s' "$INPUT" | jq -r '.transcript_path // empty' 2>/dev/null)"
 else
   SID="$(printf '%s' "$INPUT" | grep -o '"session_id":"[^"]*"' | head -1 | sed 's/.*:"//;s/"$//')"
   CWD=""
+  TRANSCRIPT=""
 fi
 SID="${SID:-${CLAUDE_CODE_SESSION_ID:-nosession}}"
+TRANSCRIPT="${TRANSCRIPT//\\//}"   # normalize Windows backslashes for bash
 
 # Person resolution (cannot record without it — not a transient failure).
 u="$(printf '%s' "${USERNAME:-${USER:-}}" | tr '[:upper:]' '[:lower:]')"
@@ -38,17 +41,29 @@ taskf="$TRACK_DIR/task-$SID.txt"
 projf="$TRACK_DIR/project-$SID.txt"
 lastf="$TRACK_DIR/last-entry-$SID.txt"
 
-# Description: model-written file is the good path. If absent, use a uniformly
-# FLAGGED, project-tagged placeholder — filterable + carries context — never the
-# raw prompt (which describes the request, not the work done). Trim to 500.
+# Description priority:
+#   1. Model-written file (best — specific).
+#   2. Last assistant message from the transcript — the real record of what was
+#      just done (Claude always has this context, so entries are never "naked").
+#   3. Project-tagged placeholder ONLY if the transcript can't be read.
+# Never the raw prompt (that's the request, not the work). Trim to 500.
 DESC=""
 [[ -s "$descf" ]] && DESC="$(cat "$descf")"
 if [[ -z "${DESC//[[:space:]]/}" ]]; then
-  proj="$(basename "$CWD" 2>/dev/null)"
-  if [[ -n "$proj" && "$proj" != "." && "$proj" != "/" ]]; then
-    DESC="[needs description] $proj"
+  ctx=""
+  if [[ -n "$TRANSCRIPT" && -f "$TRANSCRIPT" ]] && command -v jq >/dev/null 2>&1; then
+    ctx="$(tac "$TRANSCRIPT" 2>/dev/null | jq -rc 'select(.type=="assistant") | (.message.content // []) | map(select(.type=="text") | .text) | join(" ")' 2>/dev/null | grep -m1 .)"
+    ctx="$(printf '%s' "$ctx" | tr '\n\t' '  ' | sed 's/  */ /g')"
+  fi
+  if [[ -n "${ctx// /}" ]]; then
+    DESC="[auto] ${ctx:0:300}"
   else
-    DESC="[needs description]"
+    proj="$(basename "$CWD" 2>/dev/null)"
+    if [[ -n "$proj" && "$proj" != "." && "$proj" != "/" ]]; then
+      DESC="[needs description] $proj"
+    else
+      DESC="[needs description]"
+    fi
   fi
 fi
 DESC="${DESC:0:500}"

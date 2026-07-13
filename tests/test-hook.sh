@@ -13,11 +13,23 @@ export APROPOS_TRACK_DIR="$TT"
 chmod +x "$DIR/tests/mocks/mock-writer.sh"
 run(){ echo "$1" | bash "$HOOK"; }
 
-# 1. No model files -> flagged, project-tagged placeholder + worktype 13 (NOT the prompt)
-run '{"session_id":"s1","cwd":"/home/eric/projects/apropos-plugin","prompt":"go"}'
+# 1a. No model files, transcript available -> description = last assistant message
+TR="$WORK/transcript.jsonl"
+{
+  printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Older assistant turn"}]}}'
+  printf '%s\n' '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"a user turn"}]}}'
+  printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"hmm"},{"type":"text","text":"Refactored the queue flush and reran tests"}]}}'
+} > "$TR"
+run "{\"session_id\":\"s1\",\"cwd\":\"/home/eric/projects/apropos-plugin\",\"prompt\":\"go\",\"transcript_path\":\"$TR\"}"
 L="$(cat "$WRITER_LOG" 2>/dev/null)"
-assert_contains "$L" "321|[needs description] apropos-plugin|13|" "fallback uses flagged placeholder + project"
+assert_contains "$L" "[auto] Refactored the queue flush and reran tests" "fallback uses last assistant message from transcript"
+assert_not_contains "$L" "needs description" "no naked placeholder when transcript available"
 assert_not_contains "$L" "|go|" "raw prompt is NOT used as description"
+
+# 1b. No model files, NO transcript -> project-tagged placeholder
+rm -f "$WRITER_LOG"
+run '{"session_id":"s1b","cwd":"/home/eric/projects/apropos-plugin","prompt":"go"}'
+assert_contains "$(cat "$WRITER_LOG" 2>/dev/null)" "321|[needs description] apropos-plugin|13|" "placeholder only when transcript unavailable"
 
 # 2. Model files override the fallback
 rm -f "$WRITER_LOG"
