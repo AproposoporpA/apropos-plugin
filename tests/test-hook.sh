@@ -63,5 +63,14 @@ run '{"session_id":"s5","prompt":"hello"}'; RC=$?
 assert_eq "0" "$RC" "hook exits 0 for unknown user"
 [[ ! -f "$WRITER_LOG" ]] && pass "unknown user records nothing" || { echo "  FAIL: recorded for unknown"; _TEST_FAILS=$((_TEST_FAILS+1)); }
 
+# 6. Description over 255 chars is trimmed to the Apropos limit
+rm -f "$WRITER_LOG"; export USERNAME="ericbarone"
+LONG="$(printf 'x%.0s' $(seq 1 300))"
+printf '%s' "$LONG" > "$TT/description-s6.txt"; printf '13' > "$TT/worktype-s6.txt"
+run '{"session_id":"s6","prompt":"p"}'
+DESC_FIELD="$(cut -d'|' -f2 "$WRITER_LOG")"
+LEN=${#DESC_FIELD}
+[[ $LEN -le 255 && $LEN -gt 0 ]] && pass "description trimmed to <=255 (len=$LEN)" || { echo "  FAIL: desc len=$LEN not in 1..255"; _TEST_FAILS=$((_TEST_FAILS+1)); }
+
 rm -rf "$WORK"
 finish

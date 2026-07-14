@@ -66,7 +66,7 @@ if [[ -z "${DESC//[[:space:]]/}" ]]; then
     fi
   fi
 fi
-DESC="${DESC:0:500}"
+DESC="${DESC:0:255}"   # Apropos varchar limit
 
 # Worktype: numeric model file -> default 13.
 WT="13"; [[ -s "$wtf" ]] && { v="$(tr -d '[:space:]' < "$wtf")"; [[ "$v" =~ ^[0-9]+$ ]] && WT="$v"; }
