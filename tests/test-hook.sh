@@ -22,7 +22,8 @@ TR="$WORK/transcript.jsonl"
 } > "$TR"
 run "{\"session_id\":\"s1\",\"cwd\":\"/home/eric/projects/apropos-plugin\",\"prompt\":\"go\",\"transcript_path\":\"$TR\"}"
 L="$(cat "$WRITER_LOG" 2>/dev/null)"
-assert_contains "$L" "[auto] Refactored the queue flush and reran tests" "fallback uses last assistant message from transcript"
+assert_contains "$L" "Refactored the queue flush and reran tests" "fallback uses last assistant message from transcript"
+assert_not_contains "$L" "[auto]" "no [auto] prefix on fallback description"
 assert_not_contains "$L" "needs description" "no naked placeholder when transcript available"
 assert_not_contains "$L" "|go|" "raw prompt is NOT used as description"
 
@@ -62,6 +63,15 @@ rm -f "$WRITER_LOG"; export USERNAME="stranger"
 run '{"session_id":"s5","prompt":"hello"}'; RC=$?
 assert_eq "0" "$RC" "hook exits 0 for unknown user"
 [[ ! -f "$WRITER_LOG" ]] && pass "unknown user records nothing" || { echo "  FAIL: recorded for unknown"; _TEST_FAILS=$((_TEST_FAILS+1)); }
+
+# 6b. AI-tell punctuation (em-dash, curly quotes) is stripped
+rm -f "$WRITER_LOG"; export USERNAME="ericbarone"
+printf 'Replaced the products \xe2\x80\x94 removed \xe2\x80\x9cold\xe2\x80\x9d ones' > "$TT/description-s6b.txt"; printf '13' > "$TT/worktype-s6b.txt"
+run '{"session_id":"s6b","prompt":"p"}'
+L6B="$(cat "$WRITER_LOG")"
+assert_not_contains "$L6B" $'\xe2\x80\x94' "em-dash stripped"
+assert_not_contains "$L6B" $'\xe2\x80\x9c' "curly quote stripped"
+assert_contains "$L6B" 'Replaced the products - removed "old" ones' "AI-tell punctuation normalized to plain"
 
 # 6. Description over 255 chars is trimmed to the Apropos limit
 rm -f "$WRITER_LOG"; export USERNAME="ericbarone"

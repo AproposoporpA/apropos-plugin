@@ -2,7 +2,7 @@
 
 Time entries are START MARKERS only — the start of a new activity ends the prior one; Apropos derives duration from the gap. One entry is recorded (or durably queued) EVERY turn; the plugin backdates the start 60s and skips only exact-duplicate segments (same worktype+task/project within 15 min).
 
-**Writing a specific description each turn is REQUIRED, not optional.** You always have the context of what you just did, so there is no excuse for a vague entry. If you don't write one, the plugin falls back to your last assistant message from the transcript (`[auto] …`), and only to a `[needs description] <project>` placeholder if that's unavailable — both are worse than a purposeful one-line summary plus the right worktype. Always write a concrete description of what was actually done this turn.
+**Writing a specific description each turn is REQUIRED, not optional.** You always have the context of what you just did, so there is no excuse for a vague entry. If you don't write one, the plugin falls back to your last assistant message from the transcript, and only to a `[needs description] <project>` placeholder if that's unavailable — both are worse than a purposeful one-line summary plus the right worktype. Always write a concrete description of what was actually done this turn.
 
 Before ending each response, write these session-keyed files in `/tmp/claude-timetrack/`:
 - `description-${CLAUDE_CODE_SESSION_ID}.txt` — one specific sentence about this turn, following the Description rules below (<=255 chars). Rewrite every turn.
@@ -19,7 +19,7 @@ Default 13 (Engineering). SQL/proc 92. Docs 23. Support 30. Architecture/design 
 1. **Past tense — completed work.** "Replaced the Barbie experience products…", never present/gerund ("Replacing…").
 2. **255 characters or less** (Apropos limit; the hook also trims to 255).
 3. **The person's own perspective — what they did.** No "helped", "assisted", "coached", "guided", "supported".
-4. **No AI wording.** Never mention AI, Claude, an assistant, automation, agents, tools, prompts, or "auto".
+4. **No AI wording or AI-tell punctuation.** Never mention AI, Claude, an assistant, automation, agents, tools, prompts, or "auto". No em-dashes, en-dashes, curly quotes, or ellipses; use plain hyphens and straight quotes. (The hook also strips these, but write clean anyway.)
 5. **No client/project/task prefix.** Don't prepend "FAO Schwarz:" or "…on the FAO staging site" — the entry is already linked to its task/project. Just state the work.
 6. **Follow the time skill.** Person auto-resolves from the Windows username (Barrett=276, Eric=321, Joel=344, Caleb=1298); each entry links to an Intervals task (`task-…txt`) or Apropos project (`project-…txt`).
 

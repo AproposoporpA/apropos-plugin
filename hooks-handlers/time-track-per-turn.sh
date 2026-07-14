@@ -56,7 +56,7 @@ if [[ -z "${DESC//[[:space:]]/}" ]]; then
     ctx="$(printf '%s' "$ctx" | tr '\n\t' '  ' | sed 's/  */ /g')"
   fi
   if [[ -n "${ctx// /}" ]]; then
-    DESC="[auto] ${ctx:0:300}"
+    DESC="${ctx:0:255}"
   else
     proj="$(basename "$CWD" 2>/dev/null)"
     if [[ -n "$proj" && "$proj" != "." && "$proj" != "/" ]]; then
@@ -66,6 +66,9 @@ if [[ -z "${DESC//[[:space:]]/}" ]]; then
     fi
   fi
 fi
+# Strip AI-tell punctuation (em/en dashes -> hyphen, curly quotes -> straight,
+# ellipsis -> ...) so entries never look machine-written.
+DESC="$(printf '%s' "$DESC" | sed -e 's/\xe2\x80\x94/-/g' -e 's/\xe2\x80\x93/-/g' -e 's/\xe2\x80\xa6/.../g' -e 's/\xe2\x80\x9c/"/g' -e 's/\xe2\x80\x9d/"/g' -e "s/\xe2\x80\x98/'/g" -e "s/\xe2\x80\x99/'/g")"
 DESC="${DESC:0:255}"   # Apropos varchar limit
 
 # Worktype: numeric model file -> default 13.
