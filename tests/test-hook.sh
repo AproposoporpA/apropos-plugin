@@ -39,13 +39,38 @@ printf '50' > "$TT/worktype-s2.txt"
 run '{"session_id":"s2","prompt":"ignored because model wrote files"}'
 assert_contains "$(cat "$WRITER_LOG")" "321|Refactored auth module|50|" "model files used over prompt"
 
-# 3. Dedup: same segment within 15 min -> second not recorded
+# 3. One row per contiguous block: continuous same-segment = 1 row; idle gap = new row
 rm -f "$WRITER_LOG"
-printf 'seg work' > "$TT/description-s3.txt"; printf '13' > "$TT/worktype-s3.txt"
-run '{"session_id":"s3","prompt":"a"}'
-printf 'seg work again' > "$TT/description-s3.txt"; printf '13' > "$TT/worktype-s3.txt"
-run '{"session_id":"s3","prompt":"b"}'
-assert_eq "1" "$(grep -c '321|' "$WRITER_LOG")" "duplicate segment recorded once"
+printf 'work on task' > "$TT/description-s3.txt"; printf '13' > "$TT/worktype-s3.txt"
+run '{"session_id":"s3","prompt":"a"}'                       # fires (1st)
+LF="$TT/last-entry-s3.txt"
+# simulate 10 min since last turn (still < 15 min) -> continuous, skip
+{ echo "$(( $(date -u +%s) - 600 ))|13|0|0"; sed -n '2p' "$LF"; } > "$LF.t" && mv "$LF.t" "$LF"
+printf 'still working' > "$TT/description-s3.txt"; printf '13' > "$TT/worktype-s3.txt"
+run '{"session_id":"s3","prompt":"b"}'                       # continuous -> skip
+assert_eq "1" "$(grep -c '321|' "$WRITER_LOG")" "continuous same-segment records once"
+# simulate 20 min of silence -> new block, new row
+{ echo "$(( $(date -u +%s) - 1200 ))|13|0|0"; sed -n '2p' "$LF"; } > "$LF.t" && mv "$LF.t" "$LF"
+printf 'resumed after stepping away' > "$TT/description-s3.txt"; printf '13' > "$TT/worktype-s3.txt"
+run '{"session_id":"s3","prompt":"c"}'                       # idle gap -> fires (2nd)
+assert_eq "2" "$(grep -c '321|' "$WRITER_LOG")" "new row after 15-min idle gap"
+
+# 3d. Exact-duplicate description + same segment -> never repeated, even after idle
+rm -f "$WRITER_LOG"
+printf 'identical text' > "$TT/description-s3d.txt"; printf '13' > "$TT/worktype-s3d.txt"
+run '{"session_id":"s3d","prompt":"a"}'                      # fires
+{ echo "$(( $(date -u +%s) - 1200 ))|13|0|0"; echo "identical text"; } > "$TT/last-entry-s3d.txt"
+printf 'identical text' > "$TT/description-s3d.txt"; printf '13' > "$TT/worktype-s3d.txt"
+run '{"session_id":"s3d","prompt":"b"}'                      # idle but identical -> skip
+assert_eq "1" "$(grep -c '321|' "$WRITER_LOG")" "exact-duplicate description not repeated"
+
+# 3e. Segment change -> always a new row
+rm -f "$WRITER_LOG"
+printf 'first task' > "$TT/description-s3e.txt"; printf '13' > "$TT/worktype-s3e.txt"
+run '{"session_id":"s3e","prompt":"a"}'
+printf 'different work' > "$TT/description-s3e.txt"; printf '92' > "$TT/worktype-s3e.txt"
+run '{"session_id":"s3e","prompt":"b"}'                      # worktype changed -> fires
+assert_eq "2" "$(grep -c '321|' "$WRITER_LOG")" "segment change records a new row"
 
 # 4. Write failure -> queued; next turn (writer restored, new worktype) -> both delivered
 rm -f "$WRITER_LOG"; touch "$WRITER_FAIL"

@@ -1,6 +1,6 @@
 ## Apropos per-turn time tracking (auto-injected by the apropos plugin)
 
-Time entries are START MARKERS only — the start of a new activity ends the prior one; Apropos derives duration from the gap. One entry is recorded (or durably queued) EVERY turn; the plugin backdates the start 60s and skips only exact-duplicate segments (same worktype+task/project within 15 min).
+Time entries are START MARKERS only - the start of a new activity ends the prior one; Apropos derives duration from the gap. The plugin records ONE start-marker per contiguous work block: a new entry begins when the work changes (worktype/task/project) or after about 15 minutes of silence; continuing the same work does not create duplicate rows. Starts are backdated 60s.
 
 **Writing a specific description each turn is REQUIRED, not optional.** You always have the context of what you just did, so there is no excuse for a vague entry. If you don't write one, the plugin falls back to your last assistant message from the transcript, and only to a `[needs description] <project>` placeholder if that's unavailable — both are worse than a purposeful one-line summary plus the right worktype. Always write a concrete description of what was actually done this turn.
 

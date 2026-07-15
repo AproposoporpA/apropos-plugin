@@ -80,19 +80,37 @@ PROJ="0"; [[ -s "$projf" ]] && PROJ="$(tr -d '[:space:]' < "$projf")"; [[ "$PROJ
 
 SEG="$WT|$TASK|$PROJ"
 NOW="$(date -u +%s)"
-DEDUP=0
+IDLE_GAP="${APROPOS_IDLE_GAP:-900}"   # seconds of silence that starts a new entry (15 min)
+
+# Record ONE start-marker per contiguous work block. Fire a new entry when the
+# segment changes (new worktype/task/project) or after an idle gap since the last
+# turn; skip while the same work continues. Also skip an exact-duplicate
+# description+segment. last-entry file: line1 "<last-turn-epoch>|<segment>",
+# line2 "<description of the block's first entry>".
+FIRE=1
+LASTDESC=""
 if [[ -f "$lastf" ]]; then
-  line="$(head -1 "$lastf")"; lt="${line%%|*}"; lk="${line#*|}"
-  if [[ "$lt" =~ ^[0-9]+$ && "$lk" == "$SEG" && $((NOW - lt)) -lt 900 ]]; then DEDUP=1; fi
+  l1="$(sed -n '1p' "$lastf")"; lt="${l1%%|*}"; lk="${l1#*|}"
+  LASTDESC="$(sed -n '2p' "$lastf")"
+  if [[ "$lk" == "$SEG" ]]; then
+    if [[ "$lt" =~ ^[0-9]+$ && $((NOW - lt)) -lt $IDLE_GAP ]]; then
+      FIRE=0                               # same work, still active -> continuous block
+    fi
+    [[ "$DESC" == "$LASTDESC" ]] && FIRE=0 # never repeat an identical entry
+  fi
 fi
 
 # Consume one-shot model files regardless (rewritten next turn).
 rm -f "$descf" "$wtf" 2>/dev/null || true
 
-if [[ $DEDUP -eq 0 ]]; then
+if [[ $FIRE -eq 1 ]]; then
   START="$(date -u -d '1 minute ago' '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date -u -v-1M '+%Y-%m-%d %H:%M:%S' 2>/dev/null)"
   q_enqueue "$QUEUE" "$PERSON" "$DESC" "$WT" "$TASK" "$PROJ" "$START"
-  printf '%s|%s\n' "$NOW" "$SEG" > "$lastf"
+  printf '%s|%s\n%s\n' "$NOW" "$SEG" "$DESC" > "$lastf"
+else
+  # Same block, still active: refresh the activity time so the idle window
+  # measures silence since the last turn; keep the block's original description.
+  printf '%s|%s\n%s\n' "$NOW" "$SEG" "$LASTDESC" > "$lastf"
 fi
 
 # Always attempt to flush (delivers this entry and any prior queued ones).
