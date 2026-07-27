@@ -36,5 +36,16 @@ assert_contains "$(cat "$LOG")" "first" "first delivered"
 FIRSTLINE="$(head -1 "$QF")"
 assert_contains "$FIRSTLINE" "$(printf 'second' | base64 | tr -d '\n')" "retained queue keeps order (second first)"
 
+# cap: deliver only N per call, keep the rest in order; next call drains
+rm -f "$QF" "$LOG"
+for i in 1 2 3 4 5; do q_enqueue "$QF" 321 "e$i" 13 0 0 "t$i"; done
+q_flush "$QF" ok_cb 2
+assert_eq "3" "$(wc -l < "$QF" | tr -d ' ')" "cap leaves the remaining entries queued"
+assert_eq "2" "$(grep -c . "$LOG")" "cap delivered only N per call"
+FIRST="$(head -1 "$QF")"
+assert_contains "$FIRST" "$(printf 'e3' | base64 | tr -d '\n')" "remaining queue keeps order (e3 next)"
+q_flush "$QF" ok_cb 0
+[[ ! -f "$QF" ]] && pass "uncapped flush drains the remainder" || { echo "  FAIL: remainder not drained"; _TEST_FAILS=$((_TEST_FAILS+1)); }
+
 rm -rf "$WORK"
 finish

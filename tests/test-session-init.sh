@@ -28,5 +28,12 @@ assert_contains "$(cat "$WRITER_LOG" 2>/dev/null)" "stranded from prior session"
 assert_not_contains "$OUT" "stranded from prior session" "flush output not injected into context"
 [[ ! -f "$HOME/.claude/apropos-time/pending.tsv" ]] && pass "queue drained at session start" || { echo "  FAIL: queue not drained"; _TEST_FAILS=$((_TEST_FAILS+1)); }
 
+# Alert: when delivery fails, undelivered entries remain and SessionStart warns.
+touch "$WORK/FAILNOW"; export WRITER_FAIL="$WORK/FAILNOW"
+q_enqueue "$HOME/.claude/apropos-time/pending.tsv" 321 "stuck entry" 13 0 0 "2026-07-10 09:00:00"
+OUT2="$(bash "$DIR/hooks-handlers/session-init.sh")"
+assert_contains "$OUT2" "APROPOS ALERT" "SessionStart warns when entries are stuck undelivered"
+[[ -f "$HOME/.claude/apropos-time/pending.tsv" ]] && pass "stuck entry stays queued (not lost)" || { echo "  FAIL: stuck entry lost"; _TEST_FAILS=$((_TEST_FAILS+1)); }
+
 rm -rf "$WORK"
 finish

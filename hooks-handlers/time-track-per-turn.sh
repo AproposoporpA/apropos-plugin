@@ -114,5 +114,7 @@ else
 fi
 
 # Always attempt to flush (delivers this entry and any prior queued ones).
-q_flush "$QUEUE" write_entry
+# Capped per turn so a backlog can't exceed the hook timeout; the rest drains
+# over subsequent turns and at SessionStart.
+q_flush "$QUEUE" write_entry "${APROPOS_FLUSH_MAX:-10}"
 exit 0

@@ -11,10 +11,14 @@ q_enqueue() {
 }
 
 q_flush() {
-  local qf="$1" cb="$2"
+  # $1 queuefile, $2 write callback, $3 optional max deliveries per call (0 = unlimited).
+  # Bounding per-call work keeps the flush inside the hook timeout so it always
+  # finishes its rewrite (no kill mid-flush, no lost/duplicated rows). Undelivered
+  # entries stay queued in order for the next call.
+  local qf="$1" cb="$2" maxn="${3:-0}"
   [[ -f "$qf" ]] || return 0
   local tmp; tmp="$(mktemp)"
-  local stopped=0
+  local stopped=0 delivered=0
   while IFS=$'\t' read -r person b64 wt task proj start; do
     [[ -z "$person" ]] && continue
     if [[ $stopped -eq 1 ]]; then
@@ -23,7 +27,8 @@ q_flush() {
     fi
     local desc; desc="$(printf '%s' "$b64" | base64 -d 2>/dev/null)"
     if "$cb" "$person" "$desc" "$wt" "$task" "$proj" "$start"; then
-      :   # delivered — drop
+      delivered=$((delivered+1))
+      if [[ $maxn -gt 0 && $delivered -ge $maxn ]]; then stopped=1; fi
     else
       stopped=1
       printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$person" "$b64" "$wt" "$task" "$proj" "$start" >> "$tmp"
