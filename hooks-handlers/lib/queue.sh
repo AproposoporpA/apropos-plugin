@@ -12,29 +12,32 @@ q_enqueue() {
 
 q_flush() {
   # $1 queuefile, $2 write callback, $3 optional max deliveries per call (0 = unlimited).
-  # Bounding per-call work keeps the flush inside the hook timeout so it always
-  # finishes its rewrite (no kill mid-flush, no lost/duplicated rows). Undelivered
-  # entries stay queued in order for the next call.
+  # CRASH-SAFE: each entry is removed from the queue the instant its insert
+  # succeeds, so a process killed mid-flush can never re-insert an already
+  # committed row. The old code rewrote the queue only at the end, so a timeout
+  # kill before that rewrite left committed rows queued and they were re-inserted
+  # on the next run (the duplicate-billing defect). Stops at the first failure
+  # and leaves that entry and the rest queued, in order.
   local qf="$1" cb="$2" maxn="${3:-0}"
   [[ -f "$qf" ]] || return 0
-  local tmp; tmp="$(mktemp)"
-  local stopped=0 delivered=0
-  while IFS=$'\t' read -r person b64 wt task proj start; do
-    [[ -z "$person" ]] && continue
-    if [[ $stopped -eq 1 ]]; then
-      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$person" "$b64" "$wt" "$task" "$proj" "$start" >> "$tmp"
+  local delivered=0
+  while [[ -s "$qf" ]]; do
+    local line; line="$(head -n 1 "$qf")"
+    if [[ -z "$line" ]]; then
+      tail -n +2 "$qf" > "$qf.tmp" 2>/dev/null && mv "$qf.tmp" "$qf"
       continue
     fi
+    local person b64 wt task proj start
+    IFS=$'\t' read -r person b64 wt task proj start <<< "$line"
     local desc; desc="$(printf '%s' "$b64" | base64 -d 2>/dev/null)"
     if "$cb" "$person" "$desc" "$wt" "$task" "$proj" "$start"; then
+      tail -n +2 "$qf" > "$qf.tmp" 2>/dev/null && mv "$qf.tmp" "$qf"   # drop delivered row immediately
       delivered=$((delivered+1))
-      if [[ $maxn -gt 0 && $delivered -ge $maxn ]]; then stopped=1; fi
+      [[ $maxn -gt 0 && $delivered -ge $maxn ]] && break
     else
-      stopped=1
-      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$person" "$b64" "$wt" "$task" "$proj" "$start" >> "$tmp"
+      break
     fi
-  done < "$qf"
-  mv "$tmp" "$qf"
-  [[ -s "$qf" ]] || rm -f "$qf"
+  done
+  [[ -f "$qf" && ! -s "$qf" ]] && rm -f "$qf"
   return 0
 }
