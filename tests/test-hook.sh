@@ -153,8 +153,16 @@ printf '%s' "$(( $(date -u +%s) - 36000 ))" > "$TT/turnstart-s30.txt"   # stamp 
 printf 'Work done just now' > "$TT/description-s30.txt"; printf '13' > "$TT/worktype-s30.txt"
 stop s30
 GOT="$(awk -F'|' '{print $6}' "$WRITER_LOG" | tail -1)"
-NOWISH="$(date -u -d '1 minute ago' '+%Y-%m-%d %H:%M' 2>/dev/null || date -u -v-1M '+%Y-%m-%d %H:%M')"
-assert_contains "$GOT" "$NOWISH" "stale stamp (10h) is ignored, start falls back to now"
+# Compare as epochs, not formatted minutes. Building the expected string with
+# date at assert time raced the hook computing it at run time, so the case failed
+# whenever a minute ticked between the two. Accept any fallback 0 to 5 minutes back.
+GOT_EPOCH="$(date -u -d "$GOT" +%s 2>/dev/null)"
+BACK=$(( $(date -u +%s) - ${GOT_EPOCH:-0} ))
+if [[ -n "$GOT_EPOCH" && $BACK -ge 0 && $BACK -le 300 ]]; then
+  pass "stale stamp (10h) is ignored, start falls back to now (${BACK}s back)"
+else
+  echo "  FAIL: stale stamp fallback out of range (got '$GOT', ${BACK}s back)"; _TEST_FAILS=$((_TEST_FAILS+1))
+fi
 
 # ...but a stamp inside the window is still honoured.
 rm -f "$WRITER_LOG"
@@ -163,8 +171,16 @@ printf '%s' "$(( $(date -u +%s) - 1800 ))" > "$TT/turnstart-s31.txt"    # 30 min
 printf 'Half hour turn' > "$TT/description-s31.txt"; printf '13' > "$TT/worktype-s31.txt"
 stop s31
 GOT="$(awk -F'|' '{print $6}' "$WRITER_LOG" | tail -1)"
-EXP="$(date -u -d '30 minutes ago' '+%Y-%m-%d %H:%M' 2>/dev/null || date -u -v-30M '+%Y-%m-%d %H:%M')"
-assert_contains "$GOT" "$EXP" "stamp within the window is still used"
+# Epoch window again, for the same reason as the stale-stamp case above: a minute
+# ticking between the hook computing the time and the test formatting it made this
+# fail intermittently. Expect ~1800s back, allow a minute of slack either side.
+GOT_EPOCH="$(date -u -d "$GOT" +%s 2>/dev/null)"
+BACK=$(( $(date -u +%s) - ${GOT_EPOCH:-0} ))
+if [[ -n "$GOT_EPOCH" && $BACK -ge 1740 && $BACK -le 1860 ]]; then
+  pass "stamp within the window is still used (${BACK}s back)"
+else
+  echo "  FAIL: in-window stamp not honoured (got '$GOT', ${BACK}s back)"; _TEST_FAILS=$((_TEST_FAILS+1))
+fi
 
 rm -rf "$WORK"
 finish
