@@ -9,7 +9,7 @@ export APROPOS_WRITER="$DIR/tests/mocks/mock-writer.sh"
 export WRITER_LOG="$WORK/writer.log"; export WRITER_FAIL="$WORK/nofail"
 chmod +x "$DIR/tests/mocks/mock-writer.sh"
 # Pre-seed a stranded queued entry from a "prior offline session".
-q_enqueue "$HOME/.claude/apropos-time/pending.tsv" 321 "stranded from prior session" 13 0 0 "2026-07-10 09:00:00"
+q_enqueue "$HOME/.claude/apropos-time/pending.tsv" 321 "stranded from prior session" 13 0 0 "2026-08-14 08:16:29"
 
 OUT="$(bash "$DIR/hooks-handlers/session-init.sh"; echo rc=$?)"
 assert_contains "$OUT" "rc=0" "exits 0"
@@ -30,7 +30,7 @@ assert_not_contains "$OUT" "stranded from prior session" "flush output not injec
 
 # Alert: when delivery fails, undelivered entries remain and SessionStart warns.
 touch "$WORK/FAILNOW"; export WRITER_FAIL="$WORK/FAILNOW"
-q_enqueue "$HOME/.claude/apropos-time/pending.tsv" 321 "stuck entry" 13 0 0 "2026-07-10 09:00:00"
+q_enqueue "$HOME/.claude/apropos-time/pending.tsv" 321 "stuck entry" 13 0 0 "2026-08-14 08:16:29"
 OUT2="$(bash "$DIR/hooks-handlers/session-init.sh")"
 assert_contains "$OUT2" "APROPOS ALERT" "SessionStart warns when entries are stuck undelivered"
 [[ -f "$HOME/.claude/apropos-time/pending.tsv" ]] && pass "stuck entry stays queued (not lost)" || { echo "  FAIL: stuck entry lost"; _TEST_FAILS=$((_TEST_FAILS+1)); }

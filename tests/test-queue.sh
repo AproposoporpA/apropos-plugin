@@ -2,17 +2,18 @@
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$DIR/tests/helpers.sh"
 source "$DIR/hooks-handlers/lib/queue.sh"
+NOWTS="$(date -u '+%Y-%m-%d %H:%M:%S')"   # tests must use a current start time; older than Q_STALE_DAYS is quarantined by design
 WORK="$(mktemp -d)"; QF="$WORK/pending.tsv"; LOG="$WORK/log"
 
 # base64 roundtrip incl. special chars
-q_enqueue "$QF" 321 $'Fix tab\there and "quotes"' 13 0 0 "2026-07-10 12:00:00"
-q_enqueue "$QF" 344 "Second entry" 23 29100 0 "2026-07-10 12:01:00"
+q_enqueue "$QF" 321 $'Fix tab\there and "quotes"' 13 0 0 "$NOWTS"
+q_enqueue "$QF" 344 "Second entry" 23 29100 0 "$NOWTS"
 
 ok_cb(){ printf '%s|%s|%s|%s|%s|%s\n' "$1" "$2" "$3" "$4" "$5" "$6" >> "$LOG"; return 0; }
 q_flush "$QF" ok_cb
 [[ ! -f "$QF" ]] && pass "queue drained/removed on success" || { echo "  FAIL: queue remains"; _TEST_FAILS=$((_TEST_FAILS+1)); }
 L="$(cat "$LOG")"
-assert_contains "$L" '321|Fix tab	here and "quotes"|13|0|0|2026-07-10 12:00:00' "entry 1 decoded correctly (order preserved)"
+assert_contains "$L" '321|Fix tab	here and "quotes"|13|0|0|'"$NOWTS"'' "entry 1 decoded correctly (order preserved)"
 assert_contains "$L" '344|Second entry|23|29100|0|' "entry 2 delivered"
 
 # all-fail retains everything
@@ -42,7 +43,7 @@ assert_contains "$FIRSTLINE" "$(printf 'second' | base64 | tr -d '\n')" "retaine
 # 239 Apropos rows from 7 real moments over 2026-08-08 to 08-10.
 # ---------------------------------------------------------------------------
 rm -rf "$QF" "$QF.lock" "$LOG"
-for i in 1 2 3; do q_enqueue "$QF" 276 "race-$i" 13 0 0 "2026-08-08 11:59:0$i"; done
+for i in 1 2 3; do q_enqueue "$QF" 276 "race-$i" 13 0 0 "$NOWTS"; done
 slow_cb(){ sleep 0.3; printf '%s\n' "$2" >> "$LOG"; return 0; }
 ( q_flush "$QF" slow_cb ) &
 ( q_flush "$QF" slow_cb ) &
@@ -91,7 +92,7 @@ for i in 2 3 4 5; do q_flush "$QF" selective_cb; done
 # Backward compatibility: 6-field lines written by the previous version still read.
 # ---------------------------------------------------------------------------
 rm -rf "$QF" "$QF.lock" "$LOG"
-printf '276\t%s\t13\t0\t0\t2026-08-07 12:00:00\n' "$(printf 'legacy line' | base64 | tr -d '\n')" > "$QF"
+printf '276\t%s\t13\t0\t0\t2026-08-14 08:14:35\n' "$(printf 'legacy line' | base64 | tr -d '\n')" > "$QF"
 q_flush "$QF" ok_cb
 assert_contains "$(cat "$LOG")" "legacy line" "6-field legacy queue line still delivers"
 
@@ -101,6 +102,22 @@ q_enqueue "$QF" 276 "after-stale-lock" 13 0 0 "t1"
 mkdir -p "$QF.lock"; echo $(( $(date -u +%s) - 9999 )) > "$QF.lock/ts"
 q_flush "$QF" ok_cb
 assert_contains "$(cat "$LOG")" "after-stale-lock" "stale lock is broken so the queue still drains"
+
+# ---------------------------------------------------------------------------
+# REGRESSION (2026-08-14): a queue stuck for weeks must retire itself.
+# Joel's machine replayed the same ten July entries every session for three weeks
+# even after updating, because the update cannot clean a queue that is already
+# poisoned. Nobody should have to know to go move a file by hand.
+# ---------------------------------------------------------------------------
+rm -rf "$QF" "$QF.lock" "$QF.stale" "$LOG"
+OLD="$(date -u -d '30 days ago' '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date -u -v-30d '+%Y-%m-%d %H:%M:%S')"
+NEW="$(date -u '+%Y-%m-%d %H:%M:%S')"
+q_enqueue "$QF" 344 "ancient stuck entry" 13 0 0 "$OLD"
+q_enqueue "$QF" 344 "todays real entry" 13 0 0 "$NEW"
+q_flush "$QF" ok_cb
+assert_contains "$(cat "$LOG")" "todays real entry" "recent entry still delivers"
+assert_not_contains "$(cat "$LOG")" "ancient stuck entry" "stale entry is NOT re-delivered"
+[[ -s "$QF.stale" ]] && pass "stale entry quarantined to .stale for inspection" || { echo "  FAIL: not quarantined"; _TEST_FAILS=$((_TEST_FAILS+1)); }
 
 rm -rf "$WORK"
 finish

@@ -74,12 +74,44 @@ q_enqueue() {
 # Delivers each entry via the callback. Entries that fail are retried on later flushes
 # until Q_MAX_ATTEMPTS, then moved to <queuefile>.dead so they stop blocking the queue.
 # A failure no longer stops the run: every entry gets its own attempt each flush.
+# Quarantine entries whose start time is older than Q_STALE_DAYS. A queue that has
+# been stuck for weeks is not a backlog worth delivering: those entries are almost
+# certainly in the database already, from earlier passes of the pre-fix flush, and
+# re-delivering them just adds more copies. Joel's machine kept replaying the same
+# ten 2026-07-13 and 07-15 entries every session for three weeks, which is what
+# grew one entry to 122 copies. Nobody should have to know to go move a file, so
+# the plugin retires the stale ones itself, into <queuefile>.stale for inspection.
+Q_STALE_DAYS="${Q_STALE_DAYS:-3}"
+
+q_quarantine_stale() {
+  local qf="$1" cutoff keep stale line start ts moved=0
+  [[ -f "$qf" ]] || return 0
+  cutoff=$(( $(_q_now) - Q_STALE_DAYS * 86400 ))
+  keep="$qf.keep"; stale="$qf.stale"
+  : > "$keep"
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    start="$(printf '%s' "$line" | cut -f6)"
+    ts="$(date -u -d "$start" +%s 2>/dev/null)"
+    if [[ -n "$ts" && "$ts" -lt "$cutoff" ]]; then
+      printf '%s\n' "$line" >> "$stale"; moved=$((moved+1))
+    else
+      printf '%s\n' "$line" >> "$keep"
+    fi
+  done < "$qf"
+  if (( moved > 0 )); then mv "$keep" "$qf"; else rm -f "$keep"; fi
+  [[ -f "$qf" && ! -s "$qf" ]] && rm -f "$qf"
+  return 0
+}
+
 q_flush() {
   local qf="$1" cb="$2"
   [[ -f "$qf" ]] || return 0
   # Only one flush at a time. If another holds the lock, do nothing; the next turn
   # flushes. Skipping is always safe because the queue is durable.
   q_lock "$qf" || return 0
+  q_quarantine_stale "$qf"
+  [[ -f "$qf" ]] || { q_unlock "$qf"; return 0; }
   local retry dead line person b64 wt task proj start attempts desc
   retry="$qf.retry"; dead="$qf.dead"
   rm -f "$retry" 2>/dev/null || true
