@@ -138,19 +138,130 @@ start_from_stamp() {
   date -u -d '1 minute ago' '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date -u -v-1M '+%Y-%m-%d %H:%M:%S' 2>/dev/null
 }
 
+# Locate this session's transcript. Claude Code stores it at
+#   ~/.claude/projects/<slug>/<session-id>.jsonl
+# where <slug> is the working directory with every non-alphanumeric character
+# replaced by a hyphen ("R:\Barrett Goldberg\Claude" -> "R--Barrett-Goldberg-Claude").
+# Derived rather than read from the hook payload, because the Stop payload's fields
+# are not guaranteed and the working directory is already stamped at prompt time.
+# $APROPOS_TRANSCRIPT overrides, which is how the tests drive this.
+transcript_path() {
+  local sid="$1" dir="$2" slug p
+  if [[ -n "${APROPOS_TRANSCRIPT:-}" ]]; then
+    [[ -s "$APROPOS_TRANSCRIPT" ]] && { printf '%s' "$APROPOS_TRANSCRIPT"; return 0; }
+    return 1
+  fi
+  [[ -n "$dir" && -n "$sid" ]] || return 1
+  slug="$(printf '%s' "$dir" | sed 's/[^A-Za-z0-9]/-/g')"
+  p="${HOME}/.claude/projects/${slug}/${sid}.jsonl"
+  [[ -s "$p" ]] && { printf '%s' "$p"; return 0; }
+  return 1
+}
+
+# Words that must never reach an invoice-facing field, whatever the source.
+APROPOS_BANNED='claude|anthropic|\bAI\b|assistant|chatbot|copilot'
+
+# Last resort before the placeholder: describe the turn from what the response
+# actually said. The final assistant text block IS this turn's answer, because Stop
+# only fires once the response is complete.
+#
+# Added 2026-08-12. The plugin README has claimed this behaviour since 0.2.0 but no
+# code implemented it, so every turn where the model forgot to write a description
+# booked "[needs description] <project>" instead. On Barrett's machine the working
+# directory is named "Claude", so that placeholder put a literal AI reference on a
+# client-invoice-facing field, repeatedly.
+# Shortest derived description worth putting on a timesheet. Measured against 12 real
+# sessions: below this the candidates are things like "Sent", "Draft below" and
+# "Incident is closed", which say less than an honest placeholder does.
+#
+# Length alone is not enough. A floor of 60 was tried and rejected because it threw
+# out real descriptions ("Rebuilt the template and verified it at five widths.", 52).
+# The bad short candidates are conversational acknowledgements, not short work, so
+# they are matched by shape below instead.
+APROPOS_DERIVE_MIN="${APROPOS_DERIVE_MIN:-40}"
+
+# Clean one candidate sentence, or fail. Shared by both sources below.
+_clean_candidate() {
+  local s
+  s="$(printf '%s' "$1" \
+       | sed -e 's/[*`#|_>]/ /g' \
+             -e 's/\[\([^]]*\)\]([^)]*)/\1/g' \
+             -e 's/^[[:space:]]*[Tt]imestamp:[[:space:]]*//' \
+             -e 's/^[[:space:]]*[0-9-]\{10\}[[:space:]][0-9:]\{5,8\}[[:space:]]*UTC[[:space:]-]*//' \
+             -e 's/^[[:space:]]*[-—–][[:space:]]*//' \
+             -e 's/[[:space:]][[:space:]]*/ /g' -e 's/^ //' -e 's/ $//')"
+  s="${s%%. *}"; s="${s%.}"
+  (( ${#s} < APROPOS_DERIVE_MIN )) && return 1
+  # Acknowledgements, not work. "Noted, that reads well and the ask is clear" passes a
+  # length floor but describes nothing that happened.
+  printf '%s' "$s" | grep -Eqi '^(noted|sent|done|yes|no|correct|agreed|thanks|thank you|ok|okay|right|sure|understood|good|fair|exactly|indeed|got it|perfect)([^[:alnum:]]|$)' && return 1
+  # The rules ban file paths and script names from an invoice-facing field.
+  printf '%s' "$s" | grep -Eq '[A-Za-z]:\\|\\\\|/[A-Za-z0-9_.-]+/|\.(ps1|sh|js|md|php|sql|json|html|txt|csv|xlsx|jsonl|cmd|bat|py)\b' && return 1
+  printf '%s' "$s" | grep -Eqi "$APROPOS_BANNED" && return 1
+  (( ${#s} > DESC_MAX )) && { s="${s:0:$DESC_MAX}"; s="${s% *}"; }
+  # Sentence case, since a lifted fragment often starts mid-thought.
+  printf '%s.' "$(printf '%s' "${s:0:1}" | tr '[:lower:]' '[:upper:]')${s:1}"
+}
+
+# Last resort before the placeholder: describe the turn from what the response
+# actually said. The final assistant text block IS this turn's answer, because Stop
+# only fires once the response is complete.
+#
+# Two sources, best first: the labelled summary that ends a long reply, then the
+# reply's opening sentence. Measured across 12 real sessions, the summary is present
+# about 60% of the time and is usually a statement of what was done; the opening
+# sentence is the better of the rest. Anything failing the floor or the content rules
+# falls through to the placeholder, which is the honest outcome.
+#
+# Added 2026-08-12. The plugin README has claimed this behaviour since 0.2.0 but no
+# code implemented it, so every turn where the model forgot to write a description
+# booked "[needs description] <project>". On Barrett's machine the working directory
+# is named "Claude", so that put a literal AI reference on an invoice-facing field.
+desc_from_transcript() {
+  local f raw out
+  command -v jq >/dev/null 2>&1 || return 1
+  f="$(transcript_path "$SID" "$1")" || return 1
+
+  # One line per text block, newest last. gsub collapses the block so tail -1 gets a
+  # whole block rather than its last physical line.
+  raw="$(tail -n 800 "$f" 2>/dev/null \
+        | jq -r 'select(.type=="assistant") | .message.content[]? | select(.type=="text") | .text | gsub("\\s+"; " ")' 2>/dev/null \
+        | awk 'NF' | tail -n 1)"
+  [[ -n "$raw" ]] || return 1
+
+  case "$raw" in
+    *"Summary:"*) out="$(_clean_candidate "${raw##*Summary:}")" && { printf '%s' "$out"; return 0; } ;;
+  esac
+  out="$(_clean_candidate "$raw")" && { printf '%s' "$out"; return 0; }
+  return 1
+}
+
 record_turn() {
   # $1 = start time as UTC "YYYY-MM-DD HH:MM:SS"
   local START="$1"
 
-  # Description: model-written file is the good path. If absent, use a uniformly
-  # FLAGGED, project-tagged placeholder — filterable + carries context — never the
-  # raw prompt (which describes the request, not the work done).
+  # Description, best source first:
+  #   1. the model-written file, which is the intended path
+  #   2. the last assistant message from the transcript
+  #   3. a flagged placeholder
+  # Never the raw prompt, which describes the request rather than the work done.
   local DESC=""
   [[ -s "$descf" ]] && DESC="$(cat "$descf")"
+  local basecwd="$CWD"
+  [[ -z "$basecwd" && -s "$cwdf" ]] && basecwd="$(cat "$cwdf")"
+  # APROPOS_DERIVE=off keeps the old behaviour, for anyone who would rather see an
+  # explicit placeholder to correct than an approximate description that reads as
+  # finished. The derived text is a safety net; the model writing one is the fix.
+  case "$(printf '%s' "${APROPOS_DERIVE:-on}" | tr '[:upper:]' '[:lower:]')" in
+    off|0|false|no) ;;
+    *) [[ -z "${DESC//[[:space:]]/}" ]] && DESC="$(desc_from_transcript "$basecwd" 2>/dev/null)" ;;
+  esac
   if [[ -z "${DESC//[[:space:]]/}" ]]; then
-    local basecwd="$CWD"
-    [[ -z "$basecwd" && -s "$cwdf" ]] && basecwd="$(cat "$cwdf")"
     local proj; proj="$(basename "$basecwd" 2>/dev/null)"
+    # Do not tag the placeholder with a project name that is itself an AI reference.
+    # "R:\Barrett Goldberg\Claude" would otherwise write "[needs description] Claude"
+    # onto a field that reaches client invoices.
+    if printf '%s' "$proj" | grep -Eqi "$APROPOS_BANNED"; then proj=""; fi
     if [[ -n "$proj" && "$proj" != "." && "$proj" != "/" ]]; then
       DESC="[needs description] $proj"
     else
@@ -173,6 +284,45 @@ record_turn() {
   # unconditionally, the second turn's real description was DELETED rather than
   # merely left unmarked. The plugin spec (§5.1) says dedup is "de-duplicate only,
   # never a reason to record nothing"; keying on the description honours that.
+  # ONE OPEN ENTRY PER ACTIVITY, shared across every session on this machine.
+  #
+  # Until 2026-08-13 this recorded a row per turn. Measured on Barrett: 321 rows Monday
+  # to Thursday, 80 a day, of which 185 of 320 were under five minutes and 20 were zero
+  # length. That cannot be reconciled with the 15-minute increment convention, and it
+  # overran the timecard's own page load so his day stopped displaying partway down.
+  #
+  # The old duplicate check could not prevent it. Its key included a hash of the
+  # description, and the description differs every turn, so the key never repeated and
+  # the check never fired. The hash went in on 2026-08-07 to stop a second turn's
+  # description being deleted; it fixed that and caused this.
+  #
+  # So the key is the ACTIVITY, task and worktype and project, with no description in
+  # it. A turn continuing an activity that is already open amends that entry rather than
+  # inserting beside it. Barrett runs six to eight sessions at once, so the open entries
+  # are held in one shared file rather than per session state: otherwise two sessions on
+  # two tasks alternate and nothing ever merges. Modelled on his real days this takes
+  # ~84 entries a day to ~27, the number of distinct activities he actually worked.
+  #
+  # APROPOS_MERGE=off restores a row per turn.
+  local ACT="$WT|$TASK|$PROJ"
+  local MERGED=0
+  case "$(printf '%s' "${APROPOS_MERGE:-on}" | tr '[:upper:]' '[:lower:]')" in
+    off|0|false|no) ;;
+    *)
+      # Markers and unattributed turns are never merged: a break is not a continuation of
+      # work, and an entry with no task cannot be amended without dropping attribution.
+      if [[ "$TASK" != "0" ]]; then
+        local open id
+        if open="$(oe_lookup "$ACT")"; then
+          id="${open%% *}"
+          if amend_entry "$id" "$PERSON" "$DESC"; then MERGED=1; fi
+        fi
+      fi
+      ;;
+  esac
+
+  # The old same-everything guard still applies to the insert path, so a genuinely
+  # identical turn inside 15 minutes does not open a second entry.
   local SEG="$WT|$TASK|$PROJ|$(_hash "$DESC")"
   local DEDUP=0
   if [[ -f "$lastf" ]]; then
@@ -181,7 +331,7 @@ record_turn() {
     if [[ "$lt" =~ ^[0-9]+$ && "$lk" == "$SEG" && $((NOW - lt)) -lt 900 ]]; then DEDUP=1; fi
   fi
 
-  if [[ $DEDUP -eq 0 ]]; then
+  if [[ $MERGED -eq 0 && $DEDUP -eq 0 ]]; then
     q_enqueue "$QUEUE" "$PERSON" "$DESC" "$WT" "$TASK" "$PROJ" "$START"
     printf '%s|%s\n' "$NOW" "$SEG" > "$lastf"
   fi
