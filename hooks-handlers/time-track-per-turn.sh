@@ -186,6 +186,40 @@ APROPOS_BANNED='claude|anthropic|\bAI\b|assistant|chatbot|copilot'
 # they are matched by shape below instead.
 APROPOS_DERIVE_MIN="${APROPOS_DERIVE_MIN:-40}"
 
+# Punctuation the house style rules ban outright. Normalised rather than refused,
+# because an em dash in an otherwise good sentence should not cost the whole
+# description. Applies to every source. (#30987)
+_desc_normalise() {
+  printf '%s' "$1" | sed -e 's/—/-/g' -e 's/–/-/g' \
+                         -e "s/‘/'/g" -e "s/’/'/g" \
+                         -e 's/“/"/g' -e 's/”/"/g' \
+                         -e 's/…/.../g'
+}
+
+# Does this text read as a reply to Barrett rather than a record of the work? Returns 0
+# when it must NOT reach the field. Every example below reached a real entry between 24
+# and 27 August 2026 and had to be rewritten by hand before the time could be invoiced.
+# (#30987)
+_desc_refuse() {
+  local s="$1"
+  # Second person. The field is read by a customer, not by the person being replied to.
+  # "your three tasks are marked complete"
+  printf '%s' "$s" | grep -Eqi '(^|[^[:alnum:]])(you|your|yours|youre)([^[:alnum:]]|$)' && return 0
+  # A state or a finding rather than an outcome. This is how a reply opens, not a record.
+  # "The suite is 35 pass, 15 fail"
+  printf '%s' "$s" | grep -Eq '^(The|It|That|This|There|These|Those|Nothing|All|Both|Here)([^[:alnum:]]|$)' && return 0
+  # A count opening a sentence is the same shape: "Two of three closed out cleanly".
+  # Only when a lowercase word follows, so a proper noun is not refused: a description
+  # may legitimately open "One Horse product import ...".
+  printf '%s' "$s" | grep -Eq '^(One|Two|Three|Four|Five|Six|Seven|Eight|Nine|Ten)[[:space:]]+[a-z]' && return 0
+  # A verdict lifted out of a review, which says nothing about what was done.
+  # "Security review complete, APPROVED, no blocking concerns"
+  printf '%s' "$s" | grep -Eq '(^|[^[:alnum:]])(APPROVED|BLOCKED|PASSED|FAILED|PASS|FAIL)([^[:alnum:]]|$)' && return 0
+  # Internal draft identifiers. "Draft r4144661579774780226 to the client"
+  printf '%s' "$s" | grep -Eq '(^|[^[:alnum:]])r-?[0-9]{10,}([^[:alnum:]]|$)' && return 0
+  return 1
+}
+
 # Clean one candidate sentence, or fail. Shared by both sources below.
 _clean_candidate() {
   local s
@@ -204,6 +238,10 @@ _clean_candidate() {
   # The rules ban file paths and script names from an invoice-facing field.
   printf '%s' "$s" | grep -Eq '[A-Za-z]:\\|\\\\|/[A-Za-z0-9_.-]+/|\.(ps1|sh|js|md|php|sql|json|html|txt|csv|xlsx|jsonl|cmd|bat|py)\b' && return 1
   printf '%s' "$s" | grep -Eqi "$APROPOS_BANNED" && return 1
+  # The same voice screen the model-written description gets, so neither route bypasses
+  # it. The derived text is the worse offender: it is lifted from a reply. (#30987)
+  s="$(_desc_normalise "$s")"
+  _desc_refuse "$s" && return 1
   (( ${#s} > DESC_MAX )) && { s="${s:0:$DESC_MAX}"; s="${s% *}"; }
   # Sentence case, since a lifted fragment often starts mid-thought.
   printf '%s.' "$(printf '%s' "${s:0:1}" | tr '[:lower:]' '[:upper:]')${s:1}"
@@ -290,7 +328,16 @@ record_turn() {
   #   3. a flagged placeholder
   # Never the raw prompt, which describes the request rather than the work done.
   local DESC=""
-  [[ -s "$descf" ]] && DESC="$(cat "$descf")"
+  if [[ -s "$descf" ]]; then
+    DESC="$(_desc_normalise "$(cat "$descf")")"
+    # A supplied description is held to the same standard as a derived one. Refusing it
+    # falls through to the transcript and then to the flagged placeholder, which is
+    # visible and gets corrected, rather than shipping a reply onto an invoice. (#30987)
+    if _desc_refuse "$DESC"; then
+      printf 'apropos: the description written this turn reads as a reply rather than a record of the work, so it was not used. Rewrite it in the past tense, from your own perspective, saying what was accomplished.\n' >&2
+      DESC=""
+    fi
+  fi
   local basecwd="$CWD"
   [[ -z "$basecwd" && -s "$cwdf" ]] && basecwd="$(cat "$cwdf")"
   # APROPOS_DERIVE=off keeps the old behaviour, for anyone who would rather see an
