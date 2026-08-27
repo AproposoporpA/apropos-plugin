@@ -92,7 +92,8 @@ for i in 2 3 4 5; do q_flush "$QF" selective_cb; done
 # Backward compatibility: 6-field lines written by the previous version still read.
 # ---------------------------------------------------------------------------
 rm -rf "$QF" "$QF.lock" "$LOG"
-printf '276\t%s\t13\t0\t0\t2026-08-14 08:14:35\n' "$(printf 'legacy line' | base64 | tr -d '\n')" > "$QF"
+RECENT="$(date -u -d '1 hour ago' '+%Y-%m-%d %H:%M:%S')"
+printf '276\t%s\t13\t0\t0\t%s\n' "$(printf 'legacy line' | base64 | tr -d '\n')" "$RECENT" > "$QF"
 q_flush "$QF" ok_cb
 assert_contains "$(cat "$LOG")" "legacy line" "6-field legacy queue line still delivers"
 
