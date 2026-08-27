@@ -65,21 +65,24 @@ oe_lookup() {
   # and anchoring it with an escaped key was worse, because activity keys contain "|"
   # and in a basic regex "\|" is alternation, so "^3\|28682\|26" matched any line
   # containing 28682. Field comparison sidesteps both.
-  id=""; epoch=""
-  while IFS=$'\t' read -r k i e; do
-    if [[ "$k" == "$key" ]]; then id="$i"; epoch="$e"; break; fi
+  id=""; epoch=""; local d=""
+  while IFS=$'\t' read -r k i e b; do
+    if [[ "$k" == "$key" ]]; then id="$i"; epoch="$e"; d="$b"; break; fi
   done < "$APROPOS_OPEN_FILE"
   (( locked )) && _oe_unlock
   [[ -n "$id" ]] || return 1
   [[ "$id" =~ ^[0-9]+$ && "$epoch" =~ ^[0-9]+$ ]] || return 1
   (( now - epoch > APROPOS_MERGE_MAX_SECS )) && return 1
-  printf '%s %s' "$id" "$epoch"
+  # Third field is the description this recorder last wrote for the entry, base64 so it
+  # cannot break the tab layout. The caller passes it back with the amend so a row that
+  # somebody has corrected since is not silently overwritten. (#30988)
+  printf '%s %s %s' "$id" "$epoch" "$d"
 }
 
 # oe_record <activityKey> <entryId>  — remember this entry as the open one for the
 # activity, and drop any line that has aged out so the file cannot grow without bound.
 oe_record() {
-  local key="$1" id="$2" now tmp
+  local key="$1" id="$2" descb64="${3:-}" now tmp
   [[ "$id" =~ ^[0-9]+$ ]] || return 0
   # This one is a read-modify-write and MUST be exclusive. Failing to get the lock means
   # not recording the entry as open, so the next turn inserts instead of amending. That
@@ -91,14 +94,14 @@ oe_record() {
   tmp="$APROPOS_OPEN_FILE.tmp.$$"
   {
     if [[ -s "$APROPOS_OPEN_FILE" ]]; then
-      while IFS=$'\t' read -r k i e; do
+      while IFS=$'\t' read -r k i e b; do
         [[ "$k" == "$key" ]] && continue
         [[ "$e" =~ ^[0-9]+$ ]] || continue
         (( now - e > APROPOS_MERGE_MAX_SECS )) && continue
-        printf '%s\t%s\t%s\n' "$k" "$i" "$e"
+        printf '%s\t%s\t%s\t%s\n' "$k" "$i" "$e" "$b"
       done < "$APROPOS_OPEN_FILE"
     fi
-    printf '%s\t%s\t%s\n' "$key" "$id" "$now"
+    printf '%s\t%s\t%s\t%s\n' "$key" "$id" "$now" "$descb64"
   } > "$tmp" 2>/dev/null && mv "$tmp" "$APROPOS_OPEN_FILE" 2>/dev/null
   rm -f "$tmp" 2>/dev/null || true
   _oe_unlock
@@ -109,12 +112,21 @@ oe_record() {
 # normal insert; losing the amend must never lose the time.
 amend_entry() {
   if [[ -n "${APROPOS_AMENDER:-}" ]]; then "$APROPOS_AMENDER" "$@"; return $?; fi
-  local id="$1" person="$2" desc="$3"
+  local id="$1" person="$2" desc="$3" expect="${4:-}"
   local script="${APROPOS_SKILL_DIR:-R:/Intranet/ClaudeAI/skills/work-management/time}/Update-TimeDescription.ps1"
   [[ -f "$script" ]] || return 1
   local ps; ps="$(apropos_ps_exe)" || return 1
-  "$ps" -NoProfile -ExecutionPolicy Bypass -File "$script" \
-    -TimeEntryID "$id" -Description "$desc" -PersonID "$person" >/dev/null 2>&1
+  # -ExpectDescription makes the writer refuse the amend when the row no longer holds
+  # what this recorder last wrote, which means somebody corrected it. Returning non-zero
+  # sends the caller down the insert path, so the continuing work is still recorded.
+  # Omitted when there is nothing to compare, so an older writer still works. (#30988)
+  if [[ -n "$expect" ]]; then
+    "$ps" -NoProfile -ExecutionPolicy Bypass -File "$script" \
+      -TimeEntryID "$id" -Description "$desc" -PersonID "$person" -ExpectDescription "$expect" >/dev/null 2>&1
+  else
+    "$ps" -NoProfile -ExecutionPolicy Bypass -File "$script" \
+      -TimeEntryID "$id" -Description "$desc" -PersonID "$person" >/dev/null 2>&1
+  fi
 }
 
 write_entry() {
@@ -136,7 +148,7 @@ write_entry() {
   if [[ -n "$task" && "$task" != "0" ]]; then
     local newId
     newId="$(printf '%s' "$out" | grep -o 'APROPOS_ENTRY_ID=[0-9]*' | head -1 | cut -d= -f2)"
-    [[ -n "$newId" ]] && oe_record "$wt|$task|$proj" "$newId"
+    [[ -n "$newId" ]] && oe_record "$wt|$task|$proj" "$newId" "$(printf '%s' "$desc" | base64 | tr -d '\n')"
   fi
   return 0
 }

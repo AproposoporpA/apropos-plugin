@@ -433,7 +433,14 @@ record_turn() {
         local open id
         if open="$(oe_lookup "$ACT")"; then
           id="${open%% *}"
-          if amend_entry "$id" "$PERSON" "$DESC"; then MERGED=1; fi
+          # Third field is what this recorder last wrote for that entry. Pass it back so
+          # the writer can refuse the amend if the row has been corrected since. A refusal
+          # leaves MERGED at 0, so the turn is recorded as its own entry rather than
+          # overwriting somebody's correction or being lost. (#30988)
+          local expect_b64 expect=""
+          expect_b64="$(printf '%s' "$open" | awk '{print $3}')"
+          [[ -n "$expect_b64" ]] && expect="$(printf '%s' "$expect_b64" | base64 -d 2>/dev/null)"
+          if amend_entry "$id" "$PERSON" "$DESC" "$expect"; then MERGED=1; fi
         fi
       fi
       ;;
