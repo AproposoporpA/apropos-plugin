@@ -9,8 +9,9 @@ Records one Apropos start-marker every turn, with fallbacks and a durable local 
 4. Restart Claude Code.
 
 ## Reliability
-- Always records (or queues) one entry per turn. If a specific description wasn't written, it falls back to the last assistant message from the transcript (real context), and only to a `[needs description] <project>` tag if that's unavailable.
-- Backdates the start 60s; skips only exact-duplicate segments (<15 min).
+- Always records (or queues) one entry per ACTIVITY, being task + worktype + project. A turn continuing an activity already open amends that entry instead of inserting beside it; a new one opens when the activity changes or after `APROPOS_MERGE_MAX_SECS` (default 1800). Open entries are shared across concurrent sessions and guarded by the queue lock. `APROPOS_MERGE=off` restores one entry per turn.
+- If a specific description wasn't written, it falls back to the last assistant message from the transcript, preferring a labelled summary, and refuses candidates that are conversational acknowledgements, carry a file path, name the tooling, or fall under `APROPOS_DERIVE_MIN` (default 40) characters. Only then does it use a `[needs description] <project>` tag, and the project name is dropped when it is itself an AI reference. `APROPOS_DERIVE=off` disables the fallback.
+- Backdates the start to the prompt; skips only exact-duplicate segments (<15 min).
 - If the write fails or `R:`/network is down, the entry is queued locally (`~/.claude/apropos-time/`) and flushed on a later turn.
 
 ## Security

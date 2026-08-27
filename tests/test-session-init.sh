@@ -9,7 +9,7 @@ export APROPOS_WRITER="$DIR/tests/mocks/mock-writer.sh"
 export WRITER_LOG="$WORK/writer.log"; export WRITER_FAIL="$WORK/nofail"
 chmod +x "$DIR/tests/mocks/mock-writer.sh"
 # Pre-seed a stranded queued entry from a "prior offline session".
-q_enqueue "$HOME/.claude/apropos-time/pending.tsv" 321 "stranded from prior session" 13 0 0 "2026-08-14 08:16:29"
+q_enqueue "$HOME/.claude/apropos-time/pending.tsv" 321 "stranded from prior session" 13 0 0 "$(date -u -d '1 hour ago' '+%Y-%m-%d %H:%M:%S')"
 
 OUT="$(bash "$DIR/hooks-handlers/session-init.sh"; echo rc=$?)"
 assert_contains "$OUT" "rc=0" "exits 0"
@@ -20,7 +20,12 @@ assert_contains "$OUT" "backdate" "explains backdating"
 assert_not_contains "$OUT" "ClaudeAI2026" "no secret"
 assert_contains "$OUT" "Description rules" "convention includes description rules"
 assert_contains "$OUT" "Past tense" "rule: past tense"
-assert_contains "$OUT" "255 characters" "rule: 255 char limit"
+# The length rule is that 255 is a CEILING, not a target. Asserting the old literal
+# "255 characters" pinned the wording that produced entries written to the ceiling and
+# cut mid-word, so assert the two things that actually matter instead.
+assert_contains "$OUT" "255 is a hard cap" "rule: 255 is a cap, not a target"
+assert_contains "$OUT" "Length follows the work" "rule: length is set by the work"
+assert_contains "$OUT" "ONE ENTRY PER ACTIVITY" "convention explains activity-level entries"
 assert_contains "$OUT" "No AI wording" "rule: no AI wording"
 assert_contains "$OUT" "No client/project/task prefix" "rule: no prefix"
 # Flush delivered the stranded entry and did not leak into the injected context.
@@ -30,7 +35,7 @@ assert_not_contains "$OUT" "stranded from prior session" "flush output not injec
 
 # Alert: when delivery fails, undelivered entries remain and SessionStart warns.
 touch "$WORK/FAILNOW"; export WRITER_FAIL="$WORK/FAILNOW"
-q_enqueue "$HOME/.claude/apropos-time/pending.tsv" 321 "stuck entry" 13 0 0 "2026-08-14 08:16:29"
+q_enqueue "$HOME/.claude/apropos-time/pending.tsv" 321 "stuck entry" 13 0 0 "$(date -u -d '1 hour ago' '+%Y-%m-%d %H:%M:%S')"
 OUT2="$(bash "$DIR/hooks-handlers/session-init.sh")"
 assert_contains "$OUT2" "APROPOS ALERT" "SessionStart warns when entries are stuck undelivered"
 [[ -f "$HOME/.claude/apropos-time/pending.tsv" ]] && pass "stuck entry stays queued (not lost)" || { echo "  FAIL: stuck entry lost"; _TEST_FAILS=$((_TEST_FAILS+1)); }

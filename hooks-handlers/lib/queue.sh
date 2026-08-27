@@ -40,16 +40,25 @@ q_lock() {
   mkdir -p "$(dirname "$qf")" 2>/dev/null || true
   if mkdir "$lock" 2>/dev/null; then _q_now > "$lock/ts" 2>/dev/null; return 0; fi
   start="$(cat "$lock/ts" 2>/dev/null)"
+  if ! [[ "$start" =~ ^[0-9]+$ ]]; then
+    # No usable timestamp yet. Taking the lock is two steps, mkdir then the stamp, so a
+    # holder that has just succeeded at mkdir has an unstamped lock for a moment. Treating
+    # that as abandoned let a second writer rm -rf the directory and take the lock while
+    # the holder still held it; both then read-modify-wrote the open-entry map and one
+    # clobbered the other. Measured 2026-08-27: 4 runs in 10 lost between 1 and 6 of 12
+    # concurrent activities, which is how one activity comes to hold two entries.
+    #
+    # So fall back to the directory's own creation time rather than assuming abandonment.
+    # If that cannot be read either, refuse the lock: waiting is recoverable, and the
+    # caller degrades to not recording, while stealing corrupts another session's line.
+    start="$(stat -c %Y "$lock" 2>/dev/null)"
+  fi
   if [[ "$start" =~ ^[0-9]+$ ]]; then
     age=$(( $(_q_now) - start ))
     if (( age > Q_LOCK_STALE_SECS )); then
       rm -rf "$lock" 2>/dev/null || true
       if mkdir "$lock" 2>/dev/null; then _q_now > "$lock/ts" 2>/dev/null; return 0; fi
     fi
-  else
-    # No usable timestamp: treat as abandoned rather than block forever.
-    rm -rf "$lock" 2>/dev/null || true
-    if mkdir "$lock" 2>/dev/null; then _q_now > "$lock/ts" 2>/dev/null; return 0; fi
   fi
   return 1
 }

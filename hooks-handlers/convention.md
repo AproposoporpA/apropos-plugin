@@ -1,18 +1,22 @@
 ## Apropos per-turn time tracking (auto-injected by the apropos plugin)
 
-Time entries are START MARKERS only — the start of a new activity ends the prior one; Apropos derives duration from the gap. One entry is recorded (or durably queued) EVERY turn. The entry is written when your response completes and is backdated to the moment the prompt arrived, so the marker sits at the real start of the work. An entry is skipped only when the worktype, task/project AND description are all identical to the previous entry within 15 minutes.
+Time entries are START MARKERS only — the start of a new activity ends the prior one; Apropos derives duration from the gap. The entry is written when your response completes and is backdated to the moment the prompt arrived, so the marker sits at the real start of the work.
 
-**Writing a specific description each turn is REQUIRED, not optional.** If you don't, the entry still records — but only as a flagged placeholder `[needs description] <project>` at worktype 13, which the user then has to find and fix. That is a failure on your part. Always write a concrete description of what was actually done this turn.
+**ONE ENTRY PER ACTIVITY, NOT PER TURN.** An activity is a task plus worktype plus project. When a turn continues an activity that is already open, the hook AMENDS that entry rather than opening a new one, and your description REPLACES the one already there. So write a description that covers the stretch of work on that activity, not just the last thing you touched. A new entry opens when the activity changes, or after 30 minutes on the same one. The open entries are shared across every concurrent session on the machine.
+
+This replaced one-entry-per-turn on 2026-08-13, after a day produced 321 entries across four days, 185 of them under five minutes and 20 of zero length.
+
+**Writing a specific description each turn is REQUIRED, not optional.** If you don't, the hook falls back to the last assistant message in the session transcript, preferring a labelled summary. That fallback refuses conversational acknowledgements, anything carrying a file path, and anything naming the tooling, so roughly half the time it lands on a flagged `[needs description]` placeholder instead, which the user then has to find and fix. That is a failure on your part. Always write a concrete description of what was actually done.
 
 Before ending each response, write these session-keyed files in `/tmp/claude-timetrack/`:
-- `description-${CLAUDE_CODE_SESSION_ID}.txt` — one specific sentence about this turn. Rewrite every turn.
-- `worktype-${CLAUDE_CODE_SESSION_ID}.txt` — one numeric worktype ID (below). Rewrite every turn.
+- `description-${CLAUDE_CODE_SESSION_ID}.txt` — one specific sentence about this turn. Rewrite every turn. It is screened before it is recorded: second person, a state or verdict rather than an outcome, and internal draft identifiers are refused outright and fall through to a flagged placeholder. Banned dashes and curly quotes are corrected for you.
+- `worktype-${CLAUDE_CODE_SESSION_ID}.txt` — one numeric worktype ID (below). Write it when the category of the work changes. It no longer has to be rewritten every turn: the worktype carries forward, and a turn that writes none takes the one last used on its task before falling back to 13.
 - `task-${CLAUDE_CODE_SESSION_ID}.txt` — task display ID (strip `#`). Sticky; write once when known.
 - `project-${CLAUDE_CODE_SESSION_ID}.txt` — Apropos project ID. Sticky; use when no task.
 
 ### Description rules — these land on client invoices
 
-1. **Under 255 characters.** The hook truncates at 255 and so does the downstream Intervals import. Longer text is cut mid-sentence.
+1. **Length follows the work. Say what was done, once, then stop.** There is no target count. A short call is a few words; a long build may need a sentence or two. What is banned is padding: adding mechanism, reasoning, findings or counts to make small work look bigger. Most entries land well under 100 characters because most turns are one thing. **255 is a hard cap, never a goal** — the hook and the downstream Intervals import both cut there. Writing to the ceiling is the defect: on 2026-08-12, 22 of one person's 43 entries sat at exactly 255, cut mid-word, averaging 203 characters.
 2. **First person, outcome-focused, readable by a non-engineer.** No file paths, script names, class or method names, version numbers, or selector/CSS detail.
 3. **Never name Claude or any AI**, and never write about the user in the third person. The entry is from their perspective.
 4. **Never ship a placeholder** like `[needs description]` or `[Work Description Needed]`.

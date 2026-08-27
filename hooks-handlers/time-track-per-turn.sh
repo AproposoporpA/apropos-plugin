@@ -96,6 +96,12 @@ descf="$TRACK_DIR/description-$SID.txt"
 wtf="$TRACK_DIR/worktype-$SID.txt"
 taskf="$TRACK_DIR/task-$SID.txt"
 projf="$TRACK_DIR/project-$SID.txt"
+# The worktype the model wrote is a one-shot file, deleted at the end of the turn.
+# These two are what make it survive: the session carries its last worktype, and the
+# machine remembers the worktype last used on each task so a NEW session on known
+# work does not fall back to Engineering. See #30986.
+stickywtf="$TRACK_DIR/worktype-sticky-$SID.txt"
+taskwtf="$TRACK_DIR/task-worktype.tsv"
 lastf="$TRACK_DIR/last-entry-$SID.txt"
 startf="$TRACK_DIR/turnstart-$SID.txt"
 cwdf="$TRACK_DIR/cwd-$SID.txt"
@@ -138,19 +144,215 @@ start_from_stamp() {
   date -u -d '1 minute ago' '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date -u -v-1M '+%Y-%m-%d %H:%M:%S' 2>/dev/null
 }
 
+# Locate this session's transcript. Claude Code stores it at
+#   ~/.claude/projects/<slug>/<session-id>.jsonl
+# where <slug> is the working directory with every non-alphanumeric character
+# replaced by a hyphen ("R:\Barrett Goldberg\Claude" -> "R--Barrett-Goldberg-Claude").
+# Derived rather than read from the hook payload, because the Stop payload's fields
+# are not guaranteed and the working directory is already stamped at prompt time.
+# $APROPOS_TRANSCRIPT overrides, which is how the tests drive this.
+transcript_path() {
+  local sid="$1" dir="$2" slug p
+  if [[ -n "${APROPOS_TRANSCRIPT:-}" ]]; then
+    [[ -s "$APROPOS_TRANSCRIPT" ]] && { printf '%s' "$APROPOS_TRANSCRIPT"; return 0; }
+    return 1
+  fi
+  [[ -n "$dir" && -n "$sid" ]] || return 1
+  slug="$(printf '%s' "$dir" | sed 's/[^A-Za-z0-9]/-/g')"
+  p="${HOME}/.claude/projects/${slug}/${sid}.jsonl"
+  [[ -s "$p" ]] && { printf '%s' "$p"; return 0; }
+  return 1
+}
+
+# Words that must never reach an invoice-facing field, whatever the source.
+APROPOS_BANNED='claude|anthropic|\bAI\b|assistant|chatbot|copilot'
+
+# Last resort before the placeholder: describe the turn from what the response
+# actually said. The final assistant text block IS this turn's answer, because Stop
+# only fires once the response is complete.
+#
+# Added 2026-08-12. The plugin README has claimed this behaviour since 0.2.0 but no
+# code implemented it, so every turn where the model forgot to write a description
+# booked "[needs description] <project>" instead. On Barrett's machine the working
+# directory is named "Claude", so that placeholder put a literal AI reference on a
+# client-invoice-facing field, repeatedly.
+# Shortest derived description worth putting on a timesheet. Measured against 12 real
+# sessions: below this the candidates are things like "Sent", "Draft below" and
+# "Incident is closed", which say less than an honest placeholder does.
+#
+# Length alone is not enough. A floor of 60 was tried and rejected because it threw
+# out real descriptions ("Rebuilt the template and verified it at five widths.", 52).
+# The bad short candidates are conversational acknowledgements, not short work, so
+# they are matched by shape below instead.
+APROPOS_DERIVE_MIN="${APROPOS_DERIVE_MIN:-40}"
+
+# Punctuation the house style rules ban outright. Normalised rather than refused,
+# because an em dash in an otherwise good sentence should not cost the whole
+# description. Applies to every source. (#30987)
+_desc_normalise() {
+  printf '%s' "$1" | sed -e 's/—/-/g' -e 's/–/-/g' \
+                         -e "s/‘/'/g" -e "s/’/'/g" \
+                         -e 's/“/"/g' -e 's/”/"/g' \
+                         -e 's/…/.../g'
+}
+
+# Does this text read as a reply to Barrett rather than a record of the work? Returns 0
+# when it must NOT reach the field. Every example below reached a real entry between 24
+# and 27 August 2026 and had to be rewritten by hand before the time could be invoiced.
+# (#30987)
+_desc_refuse() {
+  local s="$1"
+  # Second person. The field is read by a customer, not by the person being replied to.
+  # "your three tasks are marked complete"
+  printf '%s' "$s" | grep -Eqi '(^|[^[:alnum:]])(you|your|yours|youre)([^[:alnum:]]|$)' && return 0
+  # A state or a finding rather than an outcome. This is how a reply opens, not a record.
+  # "The suite is 35 pass, 15 fail"
+  printf '%s' "$s" | grep -Eq '^(The|It|That|This|There|These|Those|Nothing|All|Both|Here)([^[:alnum:]]|$)' && return 0
+  # A count opening a sentence is the same shape: "Two of three closed out cleanly".
+  # Only when a lowercase word follows, so a proper noun is not refused: a description
+  # may legitimately open "One Horse product import ...".
+  printf '%s' "$s" | grep -Eq '^(One|Two|Three|Four|Five|Six|Seven|Eight|Nine|Ten)[[:space:]]+[a-z]' && return 0
+  # A verdict lifted out of a review, which says nothing about what was done.
+  # "Security review complete, APPROVED, no blocking concerns"
+  printf '%s' "$s" | grep -Eq '(^|[^[:alnum:]])(APPROVED|BLOCKED|PASSED|FAILED|PASS|FAIL)([^[:alnum:]]|$)' && return 0
+  # Internal draft identifiers. "Draft r4144661579774780226 to the client"
+  printf '%s' "$s" | grep -Eq '(^|[^[:alnum:]])r-?[0-9]{10,}([^[:alnum:]]|$)' && return 0
+  return 1
+}
+
+# Clean one candidate sentence, or fail. Shared by both sources below.
+_clean_candidate() {
+  local s
+  s="$(printf '%s' "$1" \
+       | sed -e 's/[*`#|_>]/ /g' \
+             -e 's/\[\([^]]*\)\]([^)]*)/\1/g' \
+             -e 's/^[[:space:]]*[Tt]imestamp:[[:space:]]*//' \
+             -e 's/^[[:space:]]*[0-9-]\{10\}[[:space:]][0-9:]\{5,8\}[[:space:]]*UTC[[:space:]-]*//' \
+             -e 's/^[[:space:]]*[-—–][[:space:]]*//' \
+             -e 's/[[:space:]][[:space:]]*/ /g' -e 's/^ //' -e 's/ $//')"
+  s="${s%%. *}"; s="${s%.}"
+  (( ${#s} < APROPOS_DERIVE_MIN )) && return 1
+  # Acknowledgements, not work. "Noted, that reads well and the ask is clear" passes a
+  # length floor but describes nothing that happened.
+  printf '%s' "$s" | grep -Eqi '^(noted|sent|done|yes|no|correct|agreed|thanks|thank you|ok|okay|right|sure|understood|good|fair|exactly|indeed|got it|perfect)([^[:alnum:]]|$)' && return 1
+  # The rules ban file paths and script names from an invoice-facing field.
+  printf '%s' "$s" | grep -Eq '[A-Za-z]:\\|\\\\|/[A-Za-z0-9_.-]+/|\.(ps1|sh|js|md|php|sql|json|html|txt|csv|xlsx|jsonl|cmd|bat|py)\b' && return 1
+  printf '%s' "$s" | grep -Eqi "$APROPOS_BANNED" && return 1
+  # The same voice screen the model-written description gets, so neither route bypasses
+  # it. The derived text is the worse offender: it is lifted from a reply. (#30987)
+  s="$(_desc_normalise "$s")"
+  _desc_refuse "$s" && return 1
+  (( ${#s} > DESC_MAX )) && { s="${s:0:$DESC_MAX}"; s="${s% *}"; }
+  # Sentence case, since a lifted fragment often starts mid-thought.
+  printf '%s.' "$(printf '%s' "${s:0:1}" | tr '[:lower:]' '[:upper:]')${s:1}"
+}
+
+# Last resort before the placeholder: describe the turn from what the response
+# actually said. The final assistant text block IS this turn's answer, because Stop
+# only fires once the response is complete.
+#
+# Two sources, best first: the labelled summary that ends a long reply, then the
+# reply's opening sentence. Measured across 12 real sessions, the summary is present
+# about 60% of the time and is usually a statement of what was done; the opening
+# sentence is the better of the rest. Anything failing the floor or the content rules
+# falls through to the placeholder, which is the honest outcome.
+#
+# Added 2026-08-12. The plugin README has claimed this behaviour since 0.2.0 but no
+# code implemented it, so every turn where the model forgot to write a description
+# booked "[needs description] <project>". On Barrett's machine the working directory
+# is named "Claude", so that put a literal AI reference on an invoice-facing field.
+desc_from_transcript() {
+  local f raw out
+  command -v jq >/dev/null 2>&1 || return 1
+  f="$(transcript_path "$SID" "$1")" || return 1
+
+  # One line per text block, newest last. gsub collapses the block so tail -1 gets a
+  # whole block rather than its last physical line.
+  raw="$(tail -n 800 "$f" 2>/dev/null \
+        | jq -r 'select(.type=="assistant") | .message.content[]? | select(.type=="text") | .text | gsub("\\s+"; " ")' 2>/dev/null \
+        | awk 'NF' | tail -n 1)"
+  [[ -n "$raw" ]] || return 1
+
+  case "$raw" in
+    *"Summary:"*) out="$(_clean_candidate "${raw##*Summary:}")" && { printf '%s' "$out"; return 0; } ;;
+  esac
+  out="$(_clean_candidate "$raw")" && { printf '%s' "$out"; return 0; }
+  return 1
+}
+
+# task_wt_lookup <task> -> prints the worktype last recorded against that task.
+task_wt_lookup() {
+  local t="$1" k v
+  [[ "$t" =~ ^[0-9]+$ ]] && [[ "$t" != "0" ]] || return 1
+  [[ -s "$taskwtf" ]] || return 1
+  while IFS=$'	' read -r k v; do
+    if [[ "$k" == "$t" ]]; then printf '%s' "$v"; return 0; fi
+  done < "$taskwtf"
+  return 1
+}
+
+# task_wt_record <task> <worktype> — remember the worktype for this task. Shared across
+# every session on the machine, so it is a read-modify-write and takes the lock. Failing
+# to get it means the next session may fall back to the default, which is untidy, where
+# clobbering the file would lose every task's worktype at once.
+task_wt_record() {
+  local t="$1" w="$2" tmp k v
+  [[ "$t" =~ ^[0-9]+$ ]] && [[ "$t" != "0" ]] || return 0
+  [[ "$w" =~ ^[0-9]+$ ]] || return 0
+  mkdir -p "$(dirname "$taskwtf")" 2>/dev/null || true
+  q_lock "$taskwtf" || return 0
+  tmp="$taskwtf.tmp.$$"
+  {
+    if [[ -s "$taskwtf" ]]; then
+      while IFS=$'	' read -r k v; do
+        [[ "$k" == "$t" ]] && continue
+        [[ "$k" =~ ^[0-9]+$ ]] && [[ "$v" =~ ^[0-9]+$ ]] || continue
+        printf '%s	%s
+' "$k" "$v"
+      done < "$taskwtf"
+    fi
+    printf '%s	%s
+' "$t" "$w"
+  } > "$tmp" 2>/dev/null && mv "$tmp" "$taskwtf" 2>/dev/null
+  rm -f "$tmp" 2>/dev/null || true
+  q_unlock "$taskwtf"
+}
+
 record_turn() {
   # $1 = start time as UTC "YYYY-MM-DD HH:MM:SS"
   local START="$1"
 
-  # Description: model-written file is the good path. If absent, use a uniformly
-  # FLAGGED, project-tagged placeholder — filterable + carries context — never the
-  # raw prompt (which describes the request, not the work done).
+  # Description, best source first:
+  #   1. the model-written file, which is the intended path
+  #   2. the last assistant message from the transcript
+  #   3. a flagged placeholder
+  # Never the raw prompt, which describes the request rather than the work done.
   local DESC=""
-  [[ -s "$descf" ]] && DESC="$(cat "$descf")"
+  if [[ -s "$descf" ]]; then
+    DESC="$(_desc_normalise "$(cat "$descf")")"
+    # A supplied description is held to the same standard as a derived one. Refusing it
+    # falls through to the transcript and then to the flagged placeholder, which is
+    # visible and gets corrected, rather than shipping a reply onto an invoice. (#30987)
+    if _desc_refuse "$DESC"; then
+      printf 'apropos: the description written this turn reads as a reply rather than a record of the work, so it was not used. Rewrite it in the past tense, from your own perspective, saying what was accomplished.\n' >&2
+      DESC=""
+    fi
+  fi
+  local basecwd="$CWD"
+  [[ -z "$basecwd" && -s "$cwdf" ]] && basecwd="$(cat "$cwdf")"
+  # APROPOS_DERIVE=off keeps the old behaviour, for anyone who would rather see an
+  # explicit placeholder to correct than an approximate description that reads as
+  # finished. The derived text is a safety net; the model writing one is the fix.
+  case "$(printf '%s' "${APROPOS_DERIVE:-on}" | tr '[:upper:]' '[:lower:]')" in
+    off|0|false|no) ;;
+    *) [[ -z "${DESC//[[:space:]]/}" ]] && DESC="$(desc_from_transcript "$basecwd" 2>/dev/null)" ;;
+  esac
   if [[ -z "${DESC//[[:space:]]/}" ]]; then
-    local basecwd="$CWD"
-    [[ -z "$basecwd" && -s "$cwdf" ]] && basecwd="$(cat "$cwdf")"
     local proj; proj="$(basename "$basecwd" 2>/dev/null)"
+    # Do not tag the placeholder with a project name that is itself an AI reference.
+    # "R:\Barrett Goldberg\Claude" would otherwise write "[needs description] Claude"
+    # onto a field that reaches client invoices.
+    if printf '%s' "$proj" | grep -Eqi "$APROPOS_BANNED"; then proj=""; fi
     if [[ -n "$proj" && "$proj" != "." && "$proj" != "/" ]]; then
       DESC="[needs description] $proj"
     else
@@ -159,13 +361,40 @@ record_turn() {
   fi
   DESC="${DESC:0:$DESC_MAX}"
 
-  # Worktype: numeric model file -> default 13.
-  local WT="13"
-  [[ -s "$wtf" ]] && { local v; v="$(tr -d '[:space:]' < "$wtf")"; [[ "$v" =~ ^[0-9]+$ ]] && WT="$v"; }
-
-  # Optional sticky task/project.
+  # Optional sticky task/project. Resolved BEFORE the worktype, because the worktype can
+  # be inherited from the task.
   local TASK="0"; [[ -s "$taskf" ]] && TASK="$(tr -d '[:space:]#' < "$taskf")"; [[ "$TASK" =~ ^[0-9]+$ ]] || TASK="0"
   local PROJ="0"; [[ -s "$projf" ]] && PROJ="$(tr -d '[:space:]' < "$projf")"; [[ "$PROJ" =~ ^[0-9]+$ ]] || PROJ="0"
+
+  # Worktype, best source first:
+  #   1. the file the model wrote this turn
+  #   2. the worktype last used on this task, by any session on this machine
+  #   3. the worktype this session carried from an earlier turn
+  #   4. the documented default, reported so it can be corrected the same day
+  #
+  # Until #30986 this was step 1 or the default, and the file in step 1 is deleted at the
+  # end of every turn, so only the first turn of a stretch was categorised as intended.
+  # Everything after it booked as Engineering.
+  local WT="" WTSRC="" v=""
+  if [[ -s "$wtf" ]]; then
+    v="$(tr -d '[:space:]' < "$wtf")"
+    if [[ "$v" =~ ^[0-9]+$ ]]; then WT="$v"; WTSRC="written this turn"; fi
+  fi
+  if [[ -z "$WT" ]]; then
+    v="$(task_wt_lookup "$TASK" 2>/dev/null)"
+    if [[ "$v" =~ ^[0-9]+$ ]]; then WT="$v"; WTSRC="last used on this task"; fi
+  fi
+  if [[ -z "$WT" ]] && [[ -s "$stickywtf" ]]; then
+    v="$(tr -d '[:space:]' < "$stickywtf")"
+    if [[ "$v" =~ ^[0-9]+$ ]]; then WT="$v"; WTSRC="carried from this session"; fi
+  fi
+  if [[ -z "$WT" ]]; then
+    WT="13"; WTSRC="default"
+    printf 'apropos: no worktype was written this turn and none is on record for task %s, so this entry took the default worktype 13 (Engineering). Correct it if that is wrong.
+' "$TASK" >&2
+  fi
+  printf '%s' "$WT" > "$stickywtf" 2>/dev/null || true
+  task_wt_record "$TASK" "$WT"
 
   # Dedup key now includes the description fingerprint. Previously the key was
   # worktype|task|project only, so two consecutive turns of different work on the
@@ -173,6 +402,52 @@ record_turn() {
   # unconditionally, the second turn's real description was DELETED rather than
   # merely left unmarked. The plugin spec (§5.1) says dedup is "de-duplicate only,
   # never a reason to record nothing"; keying on the description honours that.
+  # ONE OPEN ENTRY PER ACTIVITY, shared across every session on this machine.
+  #
+  # Until 2026-08-13 this recorded a row per turn. Measured on Barrett: 321 rows Monday
+  # to Thursday, 80 a day, of which 185 of 320 were under five minutes and 20 were zero
+  # length. That cannot be reconciled with the 15-minute increment convention, and it
+  # overran the timecard's own page load so his day stopped displaying partway down.
+  #
+  # The old duplicate check could not prevent it. Its key included a hash of the
+  # description, and the description differs every turn, so the key never repeated and
+  # the check never fired. The hash went in on 2026-08-07 to stop a second turn's
+  # description being deleted; it fixed that and caused this.
+  #
+  # So the key is the ACTIVITY, task and worktype and project, with no description in
+  # it. A turn continuing an activity that is already open amends that entry rather than
+  # inserting beside it. Barrett runs six to eight sessions at once, so the open entries
+  # are held in one shared file rather than per session state: otherwise two sessions on
+  # two tasks alternate and nothing ever merges. Modelled on his real days this takes
+  # ~84 entries a day to ~27, the number of distinct activities he actually worked.
+  #
+  # APROPOS_MERGE=off restores a row per turn.
+  local ACT="$WT|$TASK|$PROJ"
+  local MERGED=0
+  case "$(printf '%s' "${APROPOS_MERGE:-on}" | tr '[:upper:]' '[:lower:]')" in
+    off|0|false|no) ;;
+    *)
+      # Markers and unattributed turns are never merged: a break is not a continuation of
+      # work, and an entry with no task cannot be amended without dropping attribution.
+      if [[ "$TASK" != "0" ]]; then
+        local open id
+        if open="$(oe_lookup "$ACT")"; then
+          id="${open%% *}"
+          # Third field is what this recorder last wrote for that entry. Pass it back so
+          # the writer can refuse the amend if the row has been corrected since. A refusal
+          # leaves MERGED at 0, so the turn is recorded as its own entry rather than
+          # overwriting somebody's correction or being lost. (#30988)
+          local expect_b64 expect=""
+          expect_b64="$(printf '%s' "$open" | awk '{print $3}')"
+          [[ -n "$expect_b64" ]] && expect="$(printf '%s' "$expect_b64" | base64 -d 2>/dev/null)"
+          if amend_entry "$id" "$PERSON" "$DESC" "$expect"; then MERGED=1; fi
+        fi
+      fi
+      ;;
+  esac
+
+  # The old same-everything guard still applies to the insert path, so a genuinely
+  # identical turn inside 15 minutes does not open a second entry.
   local SEG="$WT|$TASK|$PROJ|$(_hash "$DESC")"
   local DEDUP=0
   if [[ -f "$lastf" ]]; then
@@ -181,7 +456,7 @@ record_turn() {
     if [[ "$lt" =~ ^[0-9]+$ && "$lk" == "$SEG" && $((NOW - lt)) -lt 900 ]]; then DEDUP=1; fi
   fi
 
-  if [[ $DEDUP -eq 0 ]]; then
+  if [[ $MERGED -eq 0 && $DEDUP -eq 0 ]]; then
     q_enqueue "$QUEUE" "$PERSON" "$DESC" "$WT" "$TASK" "$PROJ" "$START"
     printf '%s|%s\n' "$NOW" "$SEG" > "$lastf"
   fi
