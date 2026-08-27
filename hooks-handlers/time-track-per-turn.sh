@@ -96,6 +96,12 @@ descf="$TRACK_DIR/description-$SID.txt"
 wtf="$TRACK_DIR/worktype-$SID.txt"
 taskf="$TRACK_DIR/task-$SID.txt"
 projf="$TRACK_DIR/project-$SID.txt"
+# The worktype the model wrote is a one-shot file, deleted at the end of the turn.
+# These two are what make it survive: the session carries its last worktype, and the
+# machine remembers the worktype last used on each task so a NEW session on known
+# work does not fall back to Engineering. See #30986.
+stickywtf="$TRACK_DIR/worktype-sticky-$SID.txt"
+taskwtf="$TRACK_DIR/task-worktype.tsv"
 lastf="$TRACK_DIR/last-entry-$SID.txt"
 startf="$TRACK_DIR/turnstart-$SID.txt"
 cwdf="$TRACK_DIR/cwd-$SID.txt"
@@ -236,6 +242,44 @@ desc_from_transcript() {
   return 1
 }
 
+# task_wt_lookup <task> -> prints the worktype last recorded against that task.
+task_wt_lookup() {
+  local t="$1" k v
+  [[ "$t" =~ ^[0-9]+$ ]] && [[ "$t" != "0" ]] || return 1
+  [[ -s "$taskwtf" ]] || return 1
+  while IFS=$'	' read -r k v; do
+    if [[ "$k" == "$t" ]]; then printf '%s' "$v"; return 0; fi
+  done < "$taskwtf"
+  return 1
+}
+
+# task_wt_record <task> <worktype> — remember the worktype for this task. Shared across
+# every session on the machine, so it is a read-modify-write and takes the lock. Failing
+# to get it means the next session may fall back to the default, which is untidy, where
+# clobbering the file would lose every task's worktype at once.
+task_wt_record() {
+  local t="$1" w="$2" tmp k v
+  [[ "$t" =~ ^[0-9]+$ ]] && [[ "$t" != "0" ]] || return 0
+  [[ "$w" =~ ^[0-9]+$ ]] || return 0
+  mkdir -p "$(dirname "$taskwtf")" 2>/dev/null || true
+  q_lock "$taskwtf" || return 0
+  tmp="$taskwtf.tmp.$$"
+  {
+    if [[ -s "$taskwtf" ]]; then
+      while IFS=$'	' read -r k v; do
+        [[ "$k" == "$t" ]] && continue
+        [[ "$k" =~ ^[0-9]+$ ]] && [[ "$v" =~ ^[0-9]+$ ]] || continue
+        printf '%s	%s
+' "$k" "$v"
+      done < "$taskwtf"
+    fi
+    printf '%s	%s
+' "$t" "$w"
+  } > "$tmp" 2>/dev/null && mv "$tmp" "$taskwtf" 2>/dev/null
+  rm -f "$tmp" 2>/dev/null || true
+  q_unlock "$taskwtf"
+}
+
 record_turn() {
   # $1 = start time as UTC "YYYY-MM-DD HH:MM:SS"
   local START="$1"
@@ -270,13 +314,40 @@ record_turn() {
   fi
   DESC="${DESC:0:$DESC_MAX}"
 
-  # Worktype: numeric model file -> default 13.
-  local WT="13"
-  [[ -s "$wtf" ]] && { local v; v="$(tr -d '[:space:]' < "$wtf")"; [[ "$v" =~ ^[0-9]+$ ]] && WT="$v"; }
-
-  # Optional sticky task/project.
+  # Optional sticky task/project. Resolved BEFORE the worktype, because the worktype can
+  # be inherited from the task.
   local TASK="0"; [[ -s "$taskf" ]] && TASK="$(tr -d '[:space:]#' < "$taskf")"; [[ "$TASK" =~ ^[0-9]+$ ]] || TASK="0"
   local PROJ="0"; [[ -s "$projf" ]] && PROJ="$(tr -d '[:space:]' < "$projf")"; [[ "$PROJ" =~ ^[0-9]+$ ]] || PROJ="0"
+
+  # Worktype, best source first:
+  #   1. the file the model wrote this turn
+  #   2. the worktype last used on this task, by any session on this machine
+  #   3. the worktype this session carried from an earlier turn
+  #   4. the documented default, reported so it can be corrected the same day
+  #
+  # Until #30986 this was step 1 or the default, and the file in step 1 is deleted at the
+  # end of every turn, so only the first turn of a stretch was categorised as intended.
+  # Everything after it booked as Engineering.
+  local WT="" WTSRC="" v=""
+  if [[ -s "$wtf" ]]; then
+    v="$(tr -d '[:space:]' < "$wtf")"
+    if [[ "$v" =~ ^[0-9]+$ ]]; then WT="$v"; WTSRC="written this turn"; fi
+  fi
+  if [[ -z "$WT" ]]; then
+    v="$(task_wt_lookup "$TASK" 2>/dev/null)"
+    if [[ "$v" =~ ^[0-9]+$ ]]; then WT="$v"; WTSRC="last used on this task"; fi
+  fi
+  if [[ -z "$WT" ]] && [[ -s "$stickywtf" ]]; then
+    v="$(tr -d '[:space:]' < "$stickywtf")"
+    if [[ "$v" =~ ^[0-9]+$ ]]; then WT="$v"; WTSRC="carried from this session"; fi
+  fi
+  if [[ -z "$WT" ]]; then
+    WT="13"; WTSRC="default"
+    printf 'apropos: no worktype was written this turn and none is on record for task %s, so this entry took the default worktype 13 (Engineering). Correct it if that is wrong.
+' "$TASK" >&2
+  fi
+  printf '%s' "$WT" > "$stickywtf" 2>/dev/null || true
+  task_wt_record "$TASK" "$WT"
 
   # Dedup key now includes the description fingerprint. Previously the key was
   # worktype|task|project only, so two consecutive turns of different work on the
