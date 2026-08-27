@@ -97,6 +97,32 @@ printf '276\t%s\t13\t0\t0\t%s\n' "$(printf 'legacy line' | base64 | tr -d '\n')"
 q_flush "$QF" ok_cb
 assert_contains "$(cat "$LOG")" "legacy line" "6-field legacy queue line still delivers"
 
+# REGRESSION (2026-08-27): a lock whose holder has not yet written its timestamp must
+# NOT be treated as abandoned. mkdir takes the lock, then ts is written a moment later,
+# so a writer arriving in that window used to rm -rf the directory and take the lock
+# while the holder still held it. Both then read-modify-wrote the open-entry map and one
+# clobbered the other, which lost between 1 and 6 of 12 concurrent activities.
+rm -rf "$QF" "$QF.lock" "$LOG"
+mkdir -p "$QF.lock"          # holder took the lock, has not stamped it yet
+if q_lock "$QF"; then
+  echo "  FAIL: stole a lock from a holder that had not yet stamped it"; _TEST_FAILS=$((_TEST_FAILS+1))
+else
+  pass "an unstamped lock is not stolen from its holder"
+fi
+
+# ...but an unstamped lock must still not wedge recording forever. Age the directory
+# itself past the window and it becomes fair game, using the directory's own mtime
+# because there is no ts to read.
+rm -rf "$QF" "$QF.lock" "$LOG"
+mkdir -p "$QF.lock"
+touch -d "@$(( $(date -u +%s) - 9999 ))" "$QF.lock" 2>/dev/null
+if q_lock "$QF"; then
+  pass "an unstamped lock older than the window is broken"
+  q_unlock "$QF"
+else
+  echo "  FAIL: an aged unstamped lock wedged the queue"; _TEST_FAILS=$((_TEST_FAILS+1))
+fi
+
 # A stale lock must not wedge recording forever.
 rm -rf "$QF" "$QF.lock" "$LOG"
 q_enqueue "$QF" 276 "after-stale-lock" 13 0 0 "t1"
