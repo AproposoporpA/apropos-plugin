@@ -66,8 +66,13 @@ oe_lookup() {
   # and in a basic regex "\|" is alternation, so "^3\|28682\|26" matched any line
   # containing 28682. Field comparison sidesteps both.
   id=""; epoch=""; local d=""
+  # Keep scanning past a claim marker rather than stopping at the first key match. A
+  # claim (#30903) is a non-numeric id, and if one ever sits alongside the real entry for
+  # the same activity, stopping early would hide the real one and the turn would insert a
+  # duplicate: the very thing the claim exists to prevent.
   while IFS=$'\t' read -r k i e b; do
-    if [[ "$k" == "$key" ]]; then id="$i"; epoch="$e"; d="$b"; break; fi
+    [[ "$k" == "$key" ]] || continue
+    if [[ "$i" =~ ^[0-9]+$ ]]; then id="$i"; epoch="$e"; d="$b"; break; fi
   done < "$APROPOS_OPEN_FILE"
   (( locked )) && _oe_unlock
   [[ -n "$id" ]] || return 1
@@ -77,6 +82,67 @@ oe_lookup() {
   # cannot break the tab layout. The caller passes it back with the amend so a row that
   # somebody has corrected since is not silently overwritten. (#30988)
   printf '%s %s %s' "$id" "$epoch" "$d"
+}
+
+# How long a claim on a brand-new activity stays credible, and how long a second session
+# waits for that claim to resolve into a real entry id. (#30903)
+APROPOS_CLAIM_MAX_SECS="${APROPOS_CLAIM_MAX_SECS:-120}"
+APROPOS_CLAIM_WAIT_TRIES="${APROPOS_CLAIM_WAIT_TRIES:-40}"
+
+# oe_claim <activityKey> -> 0 if this process now owns the right to OPEN that activity.
+#
+# oe_lookup is read-only and the entry is not recorded as open until the insert returns,
+# which takes seconds against the real writer. Two sessions starting the same brand-new
+# activity inside that window both missed and both inserted, giving one row per session:
+# the exact thing #30903 says must not happen, and a duplicate nobody can delete
+# afterwards. Claiming the key first closes the window. (#30903)
+oe_claim() {
+  local key="$1" now k i e b found=0 tmp
+  _oe_lock || return 1
+  now="$(date -u +%s)"
+  mkdir -p "$(dirname "$APROPOS_OPEN_FILE")" 2>/dev/null || true
+  if [[ -s "$APROPOS_OPEN_FILE" ]]; then
+    while IFS=$'\t' read -r k i e b; do
+      [[ "$k" == "$key" ]] || continue
+      [[ "$e" =~ ^[0-9]+$ ]] || continue
+      if [[ "$i" =~ ^[0-9]+$ ]]; then
+        (( now - e <= APROPOS_MERGE_MAX_SECS )) && found=1
+      else
+        # Somebody else's claim, still fresh. A stale one is fair game, so a session that
+        # died mid-insert cannot block the activity forever.
+        (( now - e <= APROPOS_CLAIM_MAX_SECS )) && found=1
+      fi
+    done < "$APROPOS_OPEN_FILE"
+  fi
+  if (( found )); then _oe_unlock; return 1; fi
+  tmp="$APROPOS_OPEN_FILE.tmp.$$"
+  {
+    if [[ -s "$APROPOS_OPEN_FILE" ]]; then
+      while IFS=$'\t' read -r k i e b; do
+        [[ "$k" == "$key" ]] && continue
+        [[ "$e" =~ ^[0-9]+$ ]] || continue
+        (( now - e > APROPOS_MERGE_MAX_SECS )) && continue
+        printf '%s\t%s\t%s\t%s\n' "$k" "$i" "$e" "$b"
+      done < "$APROPOS_OPEN_FILE"
+    fi
+    printf '%s\tpending:%s\t%s\t\n' "$key" "$$" "$now"
+  } > "$tmp" 2>/dev/null && mv "$tmp" "$APROPOS_OPEN_FILE" 2>/dev/null
+  rm -f "$tmp" 2>/dev/null || true
+  _oe_unlock
+  return 0
+}
+
+# oe_await <activityKey> -> prints "id epoch descb64" once another session's claim turns
+# into a real entry. Returns 1 if it does not resolve, and the caller then records its own
+# entry rather than losing the turn. (#30903)
+oe_await() {
+  local key="$1" i=0 out
+  while (( i < APROPOS_CLAIM_WAIT_TRIES )); do
+    if out="$(oe_lookup "$key")"; then printf '%s' "$out"; return 0; fi
+    sleep 0.25
+    i=$((i+1))
+  done
+  return 1
 }
 
 # oe_record <activityKey> <entryId>  — remember this entry as the open one for the

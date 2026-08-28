@@ -509,7 +509,17 @@ record_turn() {
       # work, and an entry with no task cannot be amended without dropping attribution.
       if [[ "$TASK" != "0" ]]; then
         local open id
-        if open="$(oe_lookup "$ACT")"; then
+        # No entry open yet for this activity? Claim it before inserting, so a second
+        # session starting the same brand-new activity in the same window waits for this
+        # one's id instead of inserting a second row for the same work. If the claim is
+        # refused, somebody else got there first, so wait for their id and amend that.
+        # (#30903)
+        if ! oe_lookup "$ACT" >/dev/null 2>&1; then
+          if ! oe_claim "$ACT"; then
+            open="$(oe_await "$ACT" 2>/dev/null)" || open=""
+          fi
+        fi
+        if [[ -n "$open" ]] || open="$(oe_lookup "$ACT")"; then
           id="${open%% *}"
           # Third field is what this recorder last wrote for that entry. Pass it back so
           # the writer can refuse the amend if the row has been corrected since. A refusal
