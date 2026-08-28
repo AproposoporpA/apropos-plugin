@@ -300,7 +300,12 @@ task_wt_record() {
   [[ "$t" =~ ^[0-9]+$ ]] && [[ "$t" != "0" ]] || return 0
   [[ "$w" =~ ^[0-9]+$ ]] || return 0
   mkdir -p "$(dirname "$taskwtf")" 2>/dev/null || true
-  q_lock "$taskwtf" || return 0
+  # Retry rather than give up on the first miss. QA measured the single-attempt version
+  # keeping only 2 or 3 of 20 concurrent writes, which silently defeats the whole point
+  # of the map: the next session finds nothing and falls back to Engineering. _oe_lock is
+  # the same bounded retry the open-entry map already uses, added after this identical
+  # failure mode lost real data. Reusing it rather than repeating the mistake. (#30986)
+  _tw_lock "$taskwtf" || return 0
   tmp="$taskwtf.tmp.$$"
   {
     if [[ -s "$taskwtf" ]]; then
@@ -316,6 +321,19 @@ task_wt_record() {
   } > "$tmp" 2>/dev/null && mv "$tmp" "$taskwtf" 2>/dev/null
   rm -f "$tmp" 2>/dev/null || true
   q_unlock "$taskwtf"
+}
+
+# Bounded retry around the shared task map, mirroring _oe_lock in lib/writer.sh. Kept
+# local to this file because writer.sh's copy is bound to APROPOS_OPEN_FILE. (#30986)
+_tw_lock() {
+  local f="$1" i=0
+  command -v q_lock >/dev/null 2>&1 || return 1
+  while (( i < 50 )); do
+    q_lock "$f" && return 0
+    sleep 0.1
+    i=$((i+1))
+  done
+  return 1
 }
 
 record_turn() {
@@ -394,7 +412,10 @@ record_turn() {
 ' "$TASK" >&2
   fi
   printf '%s' "$WT" > "$stickywtf" 2>/dev/null || true
-  task_wt_record "$TASK" "$WT"
+  # Only a chosen worktype is worth remembering for the task. Recording the bare default
+  # would pin a guess into the shared map as though somebody had established it, and
+  # every later session would then inherit the guess with no warning. (#30986)
+  [[ "$WTSRC" != "default" ]] && task_wt_record "$TASK" "$WT"
 
   # Dedup key now includes the description fingerprint. Previously the key was
   # worktype|task|project only, so two consecutive turns of different work on the
