@@ -460,8 +460,21 @@ record_turn() {
           # overwriting somebody's correction or being lost. (#30988)
           local expect_b64 expect=""
           expect_b64="$(printf '%s' "$open" | awk '{print $3}')"
-          [[ -n "$expect_b64" ]] && expect="$(printf '%s' "$expect_b64" | base64 -d 2>/dev/null)"
-          if amend_entry "$id" "$PERSON" "$DESC" "$expect"; then MERGED=1; fi
+          local amend_ok=1
+          if [[ -n "$expect_b64" ]]; then
+            # A corrupt field decodes to an empty string, and an empty expectation used to
+            # mean "nothing to compare", so the amend went ahead unconditionally and could
+            # discard a real correction: the very bug this guard exists to prevent, back
+            # again for that one row. Exit status alone is not a reliable gate, since a
+            # valid but unpadded value also returns 1, so require a clean round trip.
+            # Anything else refuses the amend, which falls back to inserting. (#30988 QA)
+            expect="$(printf '%s' "$expect_b64" | base64 -d 2>/dev/null)"
+            if [[ "$(printf '%s' "$expect" | base64 | tr -d '\n')" != "$expect_b64" ]]; then
+              amend_ok=0
+              printf 'apropos: the open-entry record for this activity is unreadable, so the entry was recorded separately rather than risk overwriting a correction.\n' >&2
+            fi
+          fi
+          if (( amend_ok )) && amend_entry "$id" "$PERSON" "$DESC" "$expect"; then MERGED=1; fi
         fi
       fi
       ;;
