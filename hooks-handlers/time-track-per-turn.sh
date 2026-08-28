@@ -186,37 +186,94 @@ APROPOS_BANNED='claude|anthropic|\bAI\b|assistant|chatbot|copilot'
 # they are matched by shape below instead.
 APROPOS_DERIVE_MIN="${APROPOS_DERIVE_MIN:-40}"
 
-# Punctuation the house style rules ban outright. Normalised rather than refused,
-# because an em dash in an otherwise good sentence should not cost the whole
-# description. Applies to every source. (#30987)
+# Punctuation the house style rules ban outright. Normalised rather than refused, and
+# done with bash parameter expansion rather than sed: this runs on every turn, and a
+# subprocess costs about half a second on the Windows shell this ships to. (#30987)
 _desc_normalise() {
-  printf '%s' "$1" | sed -e 's/—/-/g' -e 's/–/-/g' \
-                         -e "s/‘/'/g" -e "s/’/'/g" \
-                         -e 's/“/"/g' -e 's/”/"/g' \
-                         -e 's/…/.../g'
+  local s="$1"
+  s="${s//—/-}"; s="${s//–/-}"
+  s="${s//‘/\'}"; s="${s//’/\'}"
+  s="${s//“/\"}"; s="${s//”/\"}"
+  s="${s//…/...}"
+  printf '%s' "$s"
 }
 
-# Does this text read as a reply to Barrett rather than a record of the work? Returns 0
-# when it must NOT reach the field. Every example below reached a real entry between 24
-# and 27 August 2026 and had to be rewritten by hand before the time could be invoiced.
-# (#30987)
+# Does this text read as a reply, a report or a finding rather than a record of the work?
+# Returns 0 when it must NOT reach the invoice field.
+#
+# Rewritten 2026-08-28 after QA failed #30987. The first version only inspected the FIRST
+# word, so the defect kept landing in other shapes: proper-noun and numeral subjects,
+# "there is" mid sentence, gerund narration, a lowercase verdict, and commit hashes. Of
+# 12 real entries recorded in the hour after it shipped, it refused none and 6 were still
+# defective. Every rule below is matched against real examples from that record.
+#
+# No subprocesses. Everything is bash string work.
 _desc_refuse() {
-  local s="$1"
+  local s="$1" l w p
+  l="${s,,}"
+  # Punctuation to spaces, padded, so a plain substring test gives word boundaries.
+  p=" ${l//[^a-z0-9]/ } "
+  p="${p//  / }"; p="${p//  / }"; p="${p//  / }"
+
   # Second person. The field is read by a customer, not by the person being replied to.
-  # "your three tasks are marked complete"
-  printf '%s' "$s" | grep -Eqi '(^|[^[:alnum:]])(you|your|yours|youre)([^[:alnum:]]|$)' && return 0
-  # A state or a finding rather than an outcome. This is how a reply opens, not a record.
-  # "The suite is 35 pass, 15 fail"
-  printf '%s' "$s" | grep -Eq '^(The|It|That|This|There|These|Those|Nothing|All|Both|Here)([^[:alnum:]]|$)' && return 0
-  # A count opening a sentence is the same shape: "Two of three closed out cleanly".
-  # Only when a lowercase word follows, so a proper noun is not refused: a description
-  # may legitimately open "One Horse product import ...".
-  printf '%s' "$s" | grep -Eq '^(One|Two|Three|Four|Five|Six|Seven|Eight|Nine|Ten)[[:space:]]+[a-z]' && return 0
-  # A verdict lifted out of a review, which says nothing about what was done.
-  # "Security review complete, APPROVED, no blocking concerns"
-  printf '%s' "$s" | grep -Eq '(^|[^[:alnum:]])(APPROVED|BLOCKED|PASSED|FAILED|PASS|FAIL)([^[:alnum:]]|$)' && return 0
-  # Internal draft identifiers. "Draft r4144661579774780226 to the client"
-  printf '%s' "$s" | grep -Eq '(^|[^[:alnum:]])r-?[0-9]{10,}([^[:alnum:]]|$)' && return 0
+  case "$p" in *" you "*|*" your "*|*" yours "*|*" youre "*) return 0 ;; esac
+
+  # First-person analysis and retraction, which narrates thinking rather than work.
+  case "$p" in
+    " i "*|*" i had "*|*" i have not "*|*" i cannot "*|*" i could not "*|*" i was wrong "*|*" i am not "*|*" i do not "*) return 0 ;;
+  esac
+
+  w="${l%% *}"; w="${w//[^a-z0-9]/}"
+  # A condition or a state, not an action.
+  case " the it that this there these those nothing all both here " in
+    *" $w "*) return 0 ;;
+  esac
+  # A numeral subject: "31018 is closed as not reproducible".
+  case "$w" in ''|*[!0-9]*) ;; *) return 0 ;; esac
+  # A count opening the sentence, but only before a lowercase word, so a proper noun
+  # such as "One Horse product import verified" is not refused.
+  case " one two three four five six seven eight nine ten " in
+    *" $w "*)
+      local rest="${s#* }"
+      case "$rest" in [a-z]*) return 0 ;; esac
+    ;;
+  esac
+  # Gerund narration: "Retracting Finding 3...", "Correcting the report...". A completed
+  # record says "Retracted" or "Corrected".
+  case "$w" in *ing) return 0 ;; esac
+
+  # A condition stated mid sentence rather than at the start.
+  case "$p" in *" there is "*|*" there are "*|*" there was "*|*" there were "*) return 0 ;; esac
+
+  # A verdict lifted out of a review. Matched in its report shape rather than as a bare
+  # word, so "deployed it after the full suite passed" is still allowed.
+  case "$l" in
+    *": approved"*|*", approved,"*|*", approved."*|*": blocked"*|*", blocked,"*|*" is approved"*|*" is blocked"*) return 0 ;;
+  esac
+  # Shouted verdicts, as whole tokens. A substring test would also fire on BYPASS and
+  # COMPASS, and on PASSED inside ordinary prose.
+  local u=" ${s//[^A-Za-z0-9]/ } "
+  u="${u//  / }"; u="${u//  / }"; u="${u//  / }"
+  case "$u" in *" APPROVED "*|*" BLOCKED "*|*" PASS "*|*" FAIL "*|*" PASSED "*|*" FAILED "*) return 0 ;; esac
+
+  # Internal identifiers: draft ids, and commit hashes such as "committed as 55793a7".
+  local t
+  for t in $p; do
+    case "$t" in
+      r[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]*) return 0 ;;
+    esac
+    if [[ ${#t} -ge 7 && ${#t} -le 40 && "$t" != *[!0-9a-f]* && "$t" == *[a-f]* && "$t" == *[0-9]* ]]; then
+      return 0
+    fi
+  done
+
+  # Parity with the derived path: a file path or a reference to the tooling must never
+  # reach the field from either route. QA found these applied only to the derived text.
+  case "$l" in
+    *".ps1"*|*".sh"*|*".js"*|*".md"*|*".sql"*|*".json"*|*".html"*|*".jsonl"*|*"c:\\"*|*"r:\\"*|*"e:\\"*|*"/tmp/"*) return 0 ;;
+  esac
+  case "$p" in *" claude "*|*" anthropic "*|*" ai "*|*" assistant "*|*" chatbot "*|*" copilot "*|*" agent "*|*" subagent "*) return 0 ;; esac
+
   return 1
 }
 

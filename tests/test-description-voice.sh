@@ -68,4 +68,45 @@ next
 OUT="$(said "v$s" "You were right, passed Dev QA moves into the Delivery Queue instead." 2>&1)"
 assert_contains "$OUT" "description" "the refusal is reported"
 
+# --- REGRESSION (QA #30987, 2026-08-28) -------------------------------------------
+# The first version only inspected the first word. Of 12 real entries recorded in the
+# hour after it shipped it refused none, and 6 were still defective. Each case below is
+# taken verbatim, or near verbatim, from that record.
+
+# 9. A numeral subject.
+next; said "v$s" "31018 is closed as not reproducible with its evidence preserved on the ticket."
+assert_contains "$(last)" "needs description" "a numeral subject is refused"
+
+# 10. Gerund narration rather than a completed outcome.
+next; said "v$s" "Retracting Finding 3 as I wrote it, and the picture is now murkier than before."
+assert_contains "$(last)" "needs description" "gerund narration is refused"
+
+# 11. A condition stated mid sentence, not at the opening.
+next; said "v$s" "Correcting the report: there is an attachment on the ticket after all."
+assert_contains "$(last)" "needs description" "a condition mid sentence is refused"
+
+# 12. First-person analysis.
+next; said "v$s" "I had not matched the checks, and doing so shows zero hard blocks on any order."
+assert_contains "$(last)" "needs description" "first-person analysis is refused"
+
+# 13. A commit hash must never reach an invoice field.
+next; said "v$s" "Internal documentation done, committed as 55793a7 on main and pushed."
+assert_contains "$(last)" "needs description" "a commit hash is refused"
+
+# 14. A lowercase verdict, which the case-sensitive check used to miss.
+next; said "v$s" "Security review complete, approved, no blocking concerns to report here."
+assert_contains "$(last)" "needs description" "a lowercase verdict is refused"
+
+# 15. Parity: a file path from the model-written route, which only the derived route screened.
+next; said "v$s" "Corrected the handler at hooks-handlers/time-track-per-turn.sh and verified it."
+assert_contains "$(last)" "needs description" "a file path is refused on the model-written route too"
+
+# 16. The verdict check must not fire inside ordinary words.
+next; said "v$s" "Bypassed the compass check on the dealer path and verified the outcome."
+assert_contains "$(last)" "Bypassed the compass" "BYPASS and COMPASS are not verdicts"
+
+# 17. A real past-tense outcome with a count in it still survives.
+next; said "v$s" "Corrected three of the failing checks and deployed after the full suite passed."
+assert_contains "$(last)" "Corrected three" "an ordinary outcome mentioning counts survives"
+
 finish
