@@ -109,4 +109,40 @@ assert_contains "$(last)" "Bypassed the compass" "BYPASS and COMPASS are not ver
 next; said "v$s" "Corrected three of the failing checks and deployed after the full suite passed."
 assert_contains "$(last)" "Corrected three" "an ordinary outcome mentioning counts survives"
 
+# --- REGRESSION (QA re-review #30987, 2026-08-28) ---------------------------------
+# The rework refused real, well-formed entries. Each case below is a genuine production
+# description that was wrongly refused, or the defect that must still be caught.
+
+# 18. An obstacle described in ordinary language is not a review verdict.
+next; said "v$s" "Determined that the key audit is blocked by database permissions and named the owners."
+assert_contains "$(last)" "Determined that the key audit" "ordinary obstacle language is not a verdict"
+
+# 19. A condition as the OBJECT of completed work survives.
+next; said "v$s" "Investigated the refunds and confirmed there is no guard for orders already shipped."
+assert_contains "$(last)" "Investigated the refunds" "a condition inside completed work survives"
+
+# 20. ...but a condition as the point of the sentence is still refused.
+next; said "v$s" "Correcting the report: there is an attachment on the ticket after all."
+assert_contains "$(last)" "needs description" "a condition after a colon is still refused"
+
+# 21. A partitive opener is not a count report.
+next; said "v$s" "One of my entries sat on the fallback task and was corrected to the right one."
+assert_contains "$(last)" "One of my entries" "a partitive opener survives"
+
+# 22. An -ing NOUN subject with completed work survives.
+next; said "v$s" "Onboarding tasks were reassigned to the new owner and the packet was filed."
+assert_contains "$(last)" "Onboarding tasks were" "an -ing noun with past tense survives"
+
+# 23. ...but -ing narration with no completed work is still refused.
+next; said "v$s" "Retracting Finding 3 as I wrote it, and the picture is now murkier than before."
+assert_contains "$(last)" "needs description" "gerund narration is still refused"
+
+# 24. Parity: a UNC path is refused on the model-written route.
+next; said "v$s" "Corrected the handler at \\ricoserv02\r\Intranet\thing and verified it."
+assert_contains "$(last)" "needs description" "a UNC path is refused"
+
+# 25. Parity: a generic unix path is refused on the model-written route.
+next; said "v$s" "Corrected the config at /etc/apropos/settings.yaml and verified the result."
+assert_contains "$(last)" "needs description" "a unix path is refused"
+
 finish

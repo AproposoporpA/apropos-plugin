@@ -87,7 +87,13 @@ oe_lookup() {
 # How long a claim on a brand-new activity stays credible, and how long a second session
 # waits for that claim to resolve into a real entry id. (#30903)
 APROPOS_CLAIM_MAX_SECS="${APROPOS_CLAIM_MAX_SECS:-120}"
-APROPOS_CLAIM_WAIT_TRIES="${APROPOS_CLAIM_WAIT_TRIES:-40}"
+# Wall clock, not an iteration count. QA measured the real writer round trip on the
+# machine this ships to at 12 to 20 seconds, while 40 iterations of 0.25s was a nominal
+# 10 second budget: shorter than the thing it waits for, so the second session timed out
+# and inserted the duplicate anyway, just 10 seconds later. An iteration count also lies
+# about its own budget, because each poll costs a subprocess. 25s leaves headroom under
+# the 30s hook timeout. (#30903 QA rework)
+APROPOS_CLAIM_WAIT_SECS="${APROPOS_CLAIM_WAIT_SECS:-25}"
 
 # oe_claim <activityKey> -> 0 if this process now owns the right to OPEN that activity.
 #
@@ -96,6 +102,11 @@ APROPOS_CLAIM_WAIT_TRIES="${APROPOS_CLAIM_WAIT_TRIES:-40}"
 # activity inside that window both missed and both inserted, giving one row per session:
 # the exact thing #30903 says must not happen, and a duplicate nobody can delete
 # afterwards. Claiming the key first closes the window. (#30903)
+# Set when this process successfully claims an activity, so oe_record can tell whether
+# its own claim has since been superseded. A turn claims at most one activity. (#30903)
+OE_CLAIM_KEY=""
+OE_CLAIM_TS=""
+
 oe_claim() {
   local key="$1" now k i e b found=0 tmp
   _oe_lock || return 1
@@ -129,6 +140,7 @@ oe_claim() {
   } > "$tmp" 2>/dev/null && mv "$tmp" "$APROPOS_OPEN_FILE" 2>/dev/null
   rm -f "$tmp" 2>/dev/null || true
   _oe_unlock
+  OE_CLAIM_KEY="$key"; OE_CLAIM_TS="$now"
   return 0
 }
 
@@ -136,11 +148,11 @@ oe_claim() {
 # into a real entry. Returns 1 if it does not resolve, and the caller then records its own
 # entry rather than losing the turn. (#30903)
 oe_await() {
-  local key="$1" i=0 out
-  while (( i < APROPOS_CLAIM_WAIT_TRIES )); do
+  local key="$1" out deadline
+  deadline=$(( $(date -u +%s) + APROPOS_CLAIM_WAIT_SECS ))
+  while (( $(date -u +%s) < deadline )); do
     if out="$(oe_lookup "$key")"; then printf '%s' "$out"; return 0; fi
     sleep 0.25
-    i=$((i+1))
   done
   return 1
 }
@@ -156,6 +168,19 @@ oe_record() {
   # session's line and losing its entry from the map entirely.
   _oe_lock || return 0
   now="$(date -u +%s)"
+  # Fencing. If this process claimed this activity and a REAL entry for it is already
+  # recorded newer than that claim, another session superseded us while our insert was
+  # still in flight. Overwriting would point the map at our row and strand theirs, so
+  # leave it alone: an extra row is recoverable, a mis-pointed map is not. (#30903 QA)
+  if [[ -n "$OE_CLAIM_KEY" && "$key" == "$OE_CLAIM_KEY" && -s "$APROPOS_OPEN_FILE" ]]; then
+    local sk si se sb
+    while IFS=$'\t' read -r sk si se sb; do
+      [[ "$sk" == "$key" ]] || continue
+      [[ "$si" =~ ^[0-9]+$ ]] || continue
+      [[ "$se" =~ ^[0-9]+$ ]] || continue
+      if (( se > OE_CLAIM_TS )); then _oe_unlock; return 0; fi
+    done < "$APROPOS_OPEN_FILE"
+  fi
   mkdir -p "$(dirname "$APROPOS_OPEN_FILE")" 2>/dev/null || true
   tmp="$APROPOS_OPEN_FILE.tmp.$$"
   {

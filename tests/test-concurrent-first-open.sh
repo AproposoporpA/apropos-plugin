@@ -102,4 +102,31 @@ turn e1 "Picked the work back up after the earlier session died."
 w3="$(writes)"
 assert_eq "1" "$w3" "an abandoned claim does not block recording ($w3 recorded)"
 
+# 5. REGRESSION (QA re-review #30903, 2026-08-28): the wait must outlast the REAL writer.
+#    The first version waited a nominal 10 seconds while the documented round trip on the
+#    machine this ships to is 12 to 20 seconds, so the second session timed out and
+#    inserted the duplicate anyway, just later. Proven then by reproducing it with a wait
+#    budget deliberately shorter than the writer delay.
+: > "$WRITER_LOG"; : > "$AMEND_LOG"; rm -f "$APROPOS_OPEN_FILE"
+export MOCK_WRITE_DELAY=14
+( turn f1 "Opened the release checks under a realistic writer delay." ) &
+sleep 0.3
+( turn f2 "Continued the release checks under a realistic writer delay." ) &
+wait
+unset MOCK_WRITE_DELAY
+w4="$(writes)"
+assert_eq "1" "$w4" "one entry even when the writer takes 14 seconds ($w4 recorded)"
+
+# 6. A wait budget shorter than the writer is the failure this closed. With the budget
+#    forced below the delay the duplicate returns, which proves the budget is what matters.
+: > "$WRITER_LOG"; : > "$AMEND_LOG"; rm -f "$APROPOS_OPEN_FILE"
+export MOCK_WRITE_DELAY=6 APROPOS_CLAIM_WAIT_SECS=1
+( turn g1 "Opened the work with a deliberately short wait budget." ) &
+sleep 0.3
+( turn g2 "Continued the work with a deliberately short wait budget." ) &
+wait
+unset MOCK_WRITE_DELAY APROPOS_CLAIM_WAIT_SECS
+w5="$(writes)"
+assert_eq "2" "$w5" "a budget shorter than the writer still duplicates, as expected ($w5)"
+
 finish

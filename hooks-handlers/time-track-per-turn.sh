@@ -235,20 +235,47 @@ _desc_refuse() {
   case " one two three four five six seven eight nine ten " in
     *" $w "*)
       local rest="${s#* }"
-      case "$rest" in [a-z]*) return 0 ;; esac
+      # "One of my entries was ..." is a partitive, not a count opening a report.
+      case "$rest" in of\ *|Of\ *) ;; [a-z]*) return 0 ;; esac
     ;;
   esac
   # Gerund narration: "Retracting Finding 3...", "Correcting the report...". A completed
   # record says "Retracted" or "Corrected".
-  case "$w" in *ing) return 0 ;; esac
+  #
+  # But plenty of ordinary work opens with an -ing NOUN: "Onboarding tasks were
+  # reassigned", "Billing report exported and reconciled". The discriminator is whether
+  # the sentence reports completed work at all, so only refuse when nothing in it is
+  # past tense. Every example here came out of the real record. (#30987 QA rework 2)
+  case "$w" in
+    *ing)
+      # Only the opening clause counts. "Retracting Finding 3 as I wrote it" has a past
+      # tense verb, but it sits in a subordinate clause and the sentence is still
+      # narration. "Onboarding tasks were reassigned" carries its past tense up front.
+      local tok past=0 seen=0
+      for tok in $p; do
+        seen=$((seen+1)); (( seen > 5 )) && break
+        case "$tok" in
+          *ed) past=1; break ;;
+          wrote|ran|sent|built|made|took|set|met|put|held|got|gave|left|told|brought|caught|found|kept|spent|dealt|began|drew|wrote|read|split|cut|shut|hit|let|won|lost|paid|said|saw|went|came|did|had|was|were)
+            past=1; break ;;
+        esac
+      done
+      (( past )) || return 0
+    ;;
+  esac
 
-  # A condition stated mid sentence rather than at the start.
-  case "$p" in *" there is "*|*" there are "*|*" there was "*|*" there were "*) return 0 ;; esac
+  # A condition stated as the point of the sentence, which means at its start or straight
+  # after a colon. NOT as the object of completed work: "confirmed there is no guard for
+  # orders that already shipped" is a proper record and must survive. (#30987 QA rework 2)
+  case "$l" in
+    "there is"*|"there are"*|"there was"*|"there were"*) return 0 ;;
+    *": there is"*|*": there are"*|*": there was"*|*": there were"*) return 0 ;;
+  esac
 
   # A verdict lifted out of a review. Matched in its report shape rather than as a bare
   # word, so "deployed it after the full suite passed" is still allowed.
   case "$l" in
-    *": approved"*|*", approved,"*|*", approved."*|*": blocked"*|*", blocked,"*|*" is approved"*|*" is blocked"*) return 0 ;;
+    *": approved"*|*", approved,"*|*", approved."*|*": blocked"*|*", blocked,"*|*", blocked."*) return 0 ;;
   esac
   # Shouted verdicts, as whole tokens. A substring test would also fire on BYPASS and
   # COMPASS, and on PASSED inside ordinary prose.
@@ -270,7 +297,12 @@ _desc_refuse() {
   # Parity with the derived path: a file path or a reference to the tooling must never
   # reach the field from either route. QA found these applied only to the derived text.
   case "$l" in
-    *".ps1"*|*".sh"*|*".js"*|*".md"*|*".sql"*|*".json"*|*".html"*|*".jsonl"*|*"c:\\"*|*"r:\\"*|*"e:\\"*|*"/tmp/"*) return 0 ;;
+    *".ps1"*|*".sh"*|*".js"*|*".md"*|*".sql"*|*".json"*|*".html"*|*".jsonl"*|*".yaml"*|*".yml"*|*".py"*|*".csv"*|*".txt"*|*".bat"*|*".cmd"*|*".php"*|*".xlsx"*) return 0 ;;
+    # Any backslash at all. Measured across 550 real descriptions from ten days: not one
+    # contains a backslash, so this costs nothing and catches every Windows and UNC path
+    # shape without trying to enumerate them. (#30987 QA rework 2)
+    *\\*) return 0 ;;
+    */[a-z0-9_.-]*/[a-z0-9_.-]*) return 0 ;;
   esac
   case "$p" in *" claude "*|*" anthropic "*|*" ai "*|*" assistant "*|*" chatbot "*|*" copilot "*|*" agent "*|*" subagent "*) return 0 ;; esac
 
@@ -472,7 +504,12 @@ record_turn() {
   # Only a chosen worktype is worth remembering for the task. Recording the bare default
   # would pin a guess into the shared map as though somebody had established it, and
   # every later session would then inherit the guess with no warning. (#30986)
-  [[ "$WTSRC" != "default" ]] && task_wt_record "$TASK" "$WT"
+  # NOT recorded here. task_wt_record can now genuinely retry for the lock, and this runs
+  # before the entry is queued, so at high contention a slow lock would gate the write
+  # that actually reaches the invoice. QA measured a 38s worst case at 20 concurrent
+  # sessions against a 30s hook timeout, which would drop the whole turn rather than
+  # merely lose a worktype hint. The map is a convenience; the time is not. Recorded at
+  # the end of record_turn instead, once the entry is safely queued. (#30986 QA)
 
   # Dedup key now includes the description fingerprint. Previously the key was
   # worktype|task|project only, so two consecutive turns of different work on the
@@ -565,6 +602,10 @@ record_turn() {
   # Consume the one-shot model files. Safe here because this line is reached only
   # after the entry was enqueued, or after it was confirmed a true duplicate
   # (identical description AND segment within 15 min). Nothing unrecorded is lost.
+  # Safe to do now: the entry is queued, so a slow lock here can cost the worktype hint
+  # for the next session but can never cost the time itself. (#30986 QA)
+  [[ "$WTSRC" != "default" ]] && task_wt_record "$TASK" "$WT"
+
   rm -f "$descf" "$wtf" 2>/dev/null || true
 }
 
