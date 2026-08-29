@@ -253,4 +253,44 @@ assert_contains "$(last)" "needs description" "a bare verdict behind any preposi
 next; said "v$s" "Y'all should check the totals before Monday morning arrives."
 assert_contains "$(last)" "needs description" "contracted second person is refused"
 
+# --- REGRESSION (QA fifth review #30987, 2026-08-29) ----------------------------
+# QA failed Requirement 2 again. Round 4's copula guard was only ever REACHED from two
+# gates, a "both"/"all" opener or an "-ing" opener, so any other subject skipped it
+# entirely. And "being" satisfies the -ing gate itself, so a fourth adverb walked past
+# the three-token lookback.
+#
+# The fix is general rather than another opener on a denylist: a present tense copula
+# in the opening clause, with nothing completed in front of it, is a state report
+# whatever the subject is. This also closes the noun-subject gap that had been
+# disclosed and accepted since round 1.
+
+# 45. A noun subject with a present copula, which reached no gate at all before.
+next; said "v$s" "Status is now completely thoroughly resolved for the affected merchant."
+assert_contains "$(last)" "needs description" "a noun subject with a present copula is a state"
+
+# 46. The same with no adverbs at all, so it cannot be read as a lookback problem.
+next; said "v$s" "Coverage is largely adequate across the reporting period."
+assert_contains "$(last)" "needs description" "a bare noun-subject state report is refused"
+
+# 47. "being" satisfies the gerund gate itself, so it outran the three-token lookback.
+next; said "v$s" "Being now really fully resolved, the ticket needs no further action."
+assert_contains "$(last)" "needs description" "a being opener beyond the lookback is refused"
+
+# 48. A subordinate opener, which is in no opener list either.
+next; said "v$s" "Although the change is now fully approved, deployment awaits sign-off."
+assert_contains "$(last)" "needs description" "a subordinate clause opener does not bypass the copula"
+
+# 49. GUARD. A past tense verb in front of the copula means completed work, and the
+#     copula is then reporting on what was found rather than standing in for the work.
+next; said "v$s" "Determined that the key audit is blocked by database permissions."
+assert_contains "$(last)" "Determined that the key audit" "past tense in front of a copula survives"
+
+# 50. GUARD. The short real entries the house rules explicitly bless must not be caught.
+next; said "v$s" "Call with Blake."
+assert_contains "$(last)" "Call with Blake" "a short real entry survives"
+
+# 51. GUARD. An infinitive "to be" is not a state report.
+next; said "v$s" "Rebuilt the Klaviyo template to be responsive and verified it at five widths."
+assert_contains "$(last)" "Rebuilt the Klaviyo template" "an infinitive to be survives"
+
 finish

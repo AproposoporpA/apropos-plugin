@@ -303,6 +303,32 @@ _desc_refuse() {
   case " still currently not no looks seems appears waiting pending awaiting unable ready my " in
     *" $w "*) return 0 ;;
   esac
+  # A present tense copula in the opening clause, with nothing completed in front of
+  # it, is a state report whatever the subject is: "Status is now resolved", "Coverage
+  # is largely adequate", "Being now fully resolved, ...". This is general rather than
+  # another opener on a denylist, and QA round 5 is why. The round 4 copula guard was
+  # only ever REACHED from two gates, a "both"/"all" opener or an "-ing" opener, so any
+  # other subject skipped it, and "being" satisfies the -ing gate itself so a fourth
+  # adverb walked past the three token lookback. It also closes the noun-subject gap
+  # that had been disclosed and accepted since round 1.
+  #
+  # Scanned forward: a past tense verb reached first means the sentence is a record of
+  # work and the copula is only reporting what was found, so "Determined that the key
+  # audit is blocked" survives. "to be responsive" survives because "be" is not in the
+  # set and "Rebuilt" comes first anyway. Measured across 1151 real descriptions this
+  # refuses 8 more, and every one of them is either a finding or real work written in
+  # the present passive rather than the past tense the house rules ask for. (#30987)
+  local ctok cseen=0
+  for ctok in $p; do
+    cseen=$((cseen+1)); (( cseen > 5 )) && break
+    case " is are am being " in
+      *" $ctok "*) return 0 ;;
+    esac
+    case "$ctok" in
+      *ed) break ;;
+      wrote|ran|sent|built|made|took|set|met|put|held|got|gave|left|told|brought|caught|found|kept|spent|dealt|began|drew|read|split|cut|shut|hit|let|won|lost|paid|said|saw|went|came|did|had|was|were) break ;;
+    esac
+  done
   # A numeral subject: "31018 is closed as not reproducible".
   case "$w" in ''|*[!0-9]*) ;; *) return 0 ;; esac
   # A count opening the sentence, but only before a lowercase word, so a proper noun
