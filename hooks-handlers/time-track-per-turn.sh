@@ -198,6 +198,33 @@ _desc_normalise() {
   printf '%s' "$s"
 }
 
+# Does the OPENING clause of a padded, lowercased description carry completed work?
+# Returns 0 when it does. Only the first five tokens count: "Retracting Finding 3 as I
+# wrote it" has a past tense verb, but it sits in a subordinate clause and the sentence
+# is still narration, while "Onboarding tasks were reassigned" carries its past tense up
+# front. Shared by the gerund rule and the quantifier openers. (#30987)
+_desc_opens_past() {
+  local tok prev="" seen=0
+  for tok in $1; do
+    seen=$((seen+1)); (( seen > 5 )) && break
+    case "$tok" in
+      *ed)
+        # A present copula in front of the participle makes it a state, not work:
+        # "Both programmes ARE connected" describes how things stand, while "Both
+        # files WERE regenerated" is work that happened. Measured on the record, the
+        # blunt form newly accepted a real state report. (#30987 QA round 3)
+        case " is are am be being " in
+          *" $prev "*) prev="$tok"; continue ;;
+        esac
+        return 0 ;;
+      wrote|ran|sent|built|made|took|set|met|put|held|got|gave|left|told|brought|caught|found|kept|spent|dealt|began|drew|read|split|cut|shut|hit|let|won|lost|paid|said|saw|went|came|did|had|was|were)
+        return 0 ;;
+    esac
+    prev="$tok"
+  done
+  return 1
+}
+
 # Does this text read as a reply, a report or a finding rather than a record of the work?
 # Returns 0 when it must NOT reach the invoice field.
 #
@@ -225,7 +252,43 @@ _desc_refuse() {
 
   w="${l%% *}"; w="${w//[^a-z0-9]/}"
   # A condition or a state, not an action.
-  case " the it that this there these those nothing all both here " in
+  case " the it that this there these those nothing here " in
+    *" $w "*) return 0 ;;
+  esac
+  # "all" and "both" are quantifiers, and in front of completed work they open an
+  # ordinary record: "Both files were regenerated and checked". They only signal a
+  # state when nothing in the opening clause is past tense, which is the same
+  # discriminator the gerund rule below already uses. QA round 3 found the blanket
+  # form throwing real entries away. (#30987)
+  case " all both " in
+    *" $w "*) _desc_opens_past "$p" || return 0 ;;
+  esac
+  # A verdict opening the sentence. The rule further down catches a verdict sitting
+  # after a comma or a colon, but one that OPENS the sentence has neither in front of
+  # it, so "approved, no blocking concerns" reached the invoice while "Security review
+  # complete, approved, ..." was refused. The upper case form was refused too, so the
+  # test case passed while the class it stands for did not. (#30987 QA round 3)
+  #
+  # A verdict word is also an ordinary transitive verb. "Passed the release gate
+  # through stakeholder QA and handed it off" is a real entry from the record and must
+  # survive. The discriminator is whether the word takes an object: a comma straight
+  # after it, or a preposition where a noun phrase would go, means it does not.
+  case " approved blocked passed failed rejected denied " in
+    *" $w "*)
+      case "$l" in "$w,"*|"$w."*|"$w;"*|"$w:"*) return 0 ;; esac
+      local second="${p#" $w "}"; second="${second%% *}"
+      case " with without on at for pending against " in
+        *" $second "*) return 0 ;;
+      esac
+    ;;
+  esac
+  # State and finding openers. Each one announces a condition or an opinion rather
+  # than work that was done. Measured against 1151 real descriptions covering 25 days,
+  # not one opens with any of them, so this costs nothing. Before this, the screen
+  # refused "Everything downstream waits on a db owner" while accepting "Still waiting
+  # on the db owner", which made the rule arbitrary rather than principled: QA round 3
+  # ruled that the refusals were right and the equivalents had to follow. (#30987)
+  case " still currently not no looks seems appears waiting pending awaiting unable ready my " in
     *" $w "*) return 0 ;;
   esac
   # A numeral subject: "31018 is closed as not reproducible".
@@ -235,8 +298,22 @@ _desc_refuse() {
   case " one two three four five six seven eight nine ten " in
     *" $w "*)
       local rest="${s#* }"
-      # "One of my entries was ..." is a partitive, not a count opening a report.
-      case "$rest" in of\ *|Of\ *) ;; [a-z]*) return 0 ;; esac
+      # "One of my entries was ..." is a partitive, not a count opening a report. But
+      # the skip was written as "anything after of", which also swallowed the genuine
+      # count report "Two of three closed out cleanly" that this ticket claimed to
+      # catch. A partitive names things; a count report names another number.
+      # (#30987 QA round 3)
+      case "$rest" in
+        "of "*|"Of "*)
+          local after="${rest#* }"; after="${after%% *}"; after="${after//[^a-zA-Z0-9]/}"
+          after="${after,,}"
+          case " one two three four five six seven eight nine ten " in
+            *" $after "*) return 0 ;;
+          esac
+          case "$after" in ''|*[!0-9]*) ;; *) return 0 ;; esac
+          ;;
+        [a-z]*) return 0 ;;
+      esac
     ;;
   esac
   # Gerund narration: "Retracting Finding 3...", "Correcting the report...". A completed
@@ -251,16 +328,7 @@ _desc_refuse() {
       # Only the opening clause counts. "Retracting Finding 3 as I wrote it" has a past
       # tense verb, but it sits in a subordinate clause and the sentence is still
       # narration. "Onboarding tasks were reassigned" carries its past tense up front.
-      local tok past=0 seen=0
-      for tok in $p; do
-        seen=$((seen+1)); (( seen > 5 )) && break
-        case "$tok" in
-          *ed) past=1; break ;;
-          wrote|ran|sent|built|made|took|set|met|put|held|got|gave|left|told|brought|caught|found|kept|spent|dealt|began|drew|wrote|read|split|cut|shut|hit|let|won|lost|paid|said|saw|went|came|did|had|was|were)
-            past=1; break ;;
-        esac
-      done
-      (( past )) || return 0
+      _desc_opens_past "$p" || return 0
     ;;
   esac
 
@@ -588,7 +656,13 @@ record_turn() {
   # identical turn inside 15 minutes does not open a second entry.
   local SEG="$WT|$TASK|$PROJ|$(_hash "$DESC")"
   local DEDUP=0
-  if [[ -f "$lastf" ]]; then
+  # ...but never on the flagged placeholder. The placeholder is identical every time it
+  # is written, so two different turns that both failed to produce a usable description
+  # looked like one repeated turn and the second turn's time was dropped outright. A
+  # placeholder is an admission that we do not know what the work was; it is not
+  # evidence that the work was the same. The stricter description screen made this
+  # reachable in ordinary use rather than rarely. (#30987 QA round 3)
+  if [[ -f "$lastf" && "$DESC" != "[needs description]"* ]]; then
     local line lt lk
     line="$(head -1 "$lastf")"; lt="${line%%|*}"; lk="${line#*|}"
     if [[ "$lt" =~ ^[0-9]+$ && "$lk" == "$SEG" && $((NOW - lt)) -lt 900 ]]; then DEDUP=1; fi

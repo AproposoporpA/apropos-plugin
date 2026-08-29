@@ -145,4 +145,83 @@ assert_contains "$(last)" "needs description" "a UNC path is refused"
 next; said "v$s" "Corrected the config at /etc/apropos/settings.yaml and verified the result."
 assert_contains "$(last)" "needs description" "a unix path is refused"
 
+
+# --- REGRESSION (QA third review #30987, 2026-08-28) -----------------------------
+# QA failed the task on Requirement 2 and TEST CASE 3. Two defects, both reproduced
+# end to end before these cases were written, plus one false positive of the class
+# the second review raised and one claim on the ticket that measured false.
+
+# 26. A bare verdict opening the sentence in lower case. The upper case form was
+#     already refused, so TEST CASE 3 passed as literally written while the class it
+#     stands for did not: the verdict rule matched only after a comma or a colon, and
+#     a verdict opening the sentence has neither in front of it.
+next; said "v$s" "approved, no blocking concerns and the branch is clear to merge now."
+assert_contains "$(last)" "needs description" "a lower case verdict opening the sentence is refused"
+
+# 27. The same shape with the other verdict word.
+next; said "v$s" "blocked, waiting on the vendor to return the signed order form."
+assert_contains "$(last)" "needs description" "a lower case blocked verdict is refused"
+
+# 28. A verdict with no comma at all is still a verdict.
+next; said "v$s" "passed with no concerns after the second run through the gate."
+assert_contains "$(last)" "needs description" "an uncommaed passed verdict is refused"
+
+# 29. And its opposite. Note the comma: a verdict word taking a real object is an
+#     action, not a verdict, and case 39a below holds the line on that.
+next; said "v$s" "failed, returned to the team for a second fix before it can ship."
+assert_contains "$(last)" "needs description" "a lower case failed verdict is refused"
+
+# 30-36. State reports the screen let through while refusing the same fact worded
+#        another way. "Everything downstream waits on a db owner" was refused; every
+#        line below says something of the same kind and was accepted.
+next; said "v$s" "Still waiting on the db owner before the migration can be run."
+assert_contains "$(last)" "needs description" "a still-waiting state report is refused"
+
+next; said "v$s" "Currently blocked on the licence renewal for the staging server."
+assert_contains "$(last)" "needs description" "a currently-blocked state report is refused"
+
+next; said "v$s" "Not reproducible on the current build after three attempts today."
+assert_contains "$(last)" "needs description" "a not-reproducible finding is refused"
+
+next; said "v$s" "No blocking concerns after the review of the payment changes."
+assert_contains "$(last)" "needs description" "a no-concerns finding is refused"
+
+next; said "v$s" "Looks correct after the second pass through the reconciliation."
+assert_contains "$(last)" "needs description" "a looks-correct finding is refused"
+
+next; said "v$s" "Seems to be resolved now that the cache was cleared on the box."
+assert_contains "$(last)" "needs description" "a seems-resolved finding is refused"
+
+next; said "v$s" "my read is that the totals are fine and nothing needs restating."
+assert_contains "$(last)" "needs description" "first person analysis opening with my is refused"
+
+# 37. FALSE POSITIVE. An opening state word in front of genuinely completed work must
+#     survive, the same way an -ing noun already does. "both" sat in the opener list
+#     with no past-tense discriminator, so a plain record of work was thrown away.
+next; said "v$s" "Both files were regenerated and checked against the source system."
+assert_contains "$(last)" "Both files were regenerated" "a state opener with past tense survives"
+
+# 38. The ticket claimed this was caught. Measured, it was not: the partitive skip
+#     added for "One of my entries..." also swallowed a genuine count report.
+next; said "v$s" "Two of three closed out cleanly and the last one was reassigned."
+assert_contains "$(last)" "needs description" "a count report is refused even in the of form"
+
+# 39. ...but the partitive it was written for still survives.
+next; said "v$s" "One of my entries sat on the fallback task and was corrected today."
+assert_contains "$(last)" "One of my entries" "the partitive opener still survives"
+
+# 38a. The quantifier discriminator must not go too far the other way. Measured on
+#      the record, letting "both" through on any past-tense-looking word newly
+#      accepted this real state report, so a present copula in front of the participle
+#      ("are connected", "is proven") does not count as completed work the way a past
+#      one ("were regenerated") does.
+next; said "v$s" "Both programmes are connected and the whole chain is proven end to end."
+assert_contains "$(last)" "needs description" "a present copula participle is not completed work"
+
+# 39a. A verdict WORD taking a real object is an action and must survive. This is a
+#      genuine entry from the record, and it is why the verdict rule cannot simply
+#      refuse anything opening with passed or failed.
+next; said "v$s" "Passed the release gate through stakeholder QA and handed it off with two documentation recommendations."
+assert_contains "$(last)" "Passed the release gate" "a verdict word with an object is an action"
+
 finish
