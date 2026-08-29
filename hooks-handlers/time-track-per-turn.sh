@@ -198,6 +198,34 @@ _desc_normalise() {
   printf '%s' "$s"
 }
 
+# Is one token a past tense verb? Irregulars were matched as whole tokens, so every
+# prefixed form was invisible: "rebuilt" is not "built", "rewrote" is not "wrote",
+# "resent" is not "sent", "reset" is not "set". All four open real entries in the
+# record, and a record of work carrying a copula in the same clause was then refused as
+# a state report. Prefixes are stripped from a known short list rather than matching any
+# suffix, because "present" ends in "sent" and "asset" ends in "set". (#30987 QA round 6)
+_desc_past_token() {
+  local t="$1"
+  case "$t" in
+    *ed) return 0 ;;
+    wrote|ran|sent|built|made|took|set|met|put|held|got|gave|left|told|brought|caught|found|kept|spent|dealt|began|drew|read|split|cut|shut|hit|let|won|lost|paid|said|saw|went|came|did|had|was|were) return 0 ;;
+  esac
+  case "$t" in
+    re?*|un?*|over?*|under?*|mis?*|out?*)
+      local b="${t#re}"
+      [[ "$b" == "$t" ]] && b="${t#un}"
+      [[ "$b" == "$t" ]] && b="${t#over}"
+      [[ "$b" == "$t" ]] && b="${t#under}"
+      [[ "$b" == "$t" ]] && b="${t#mis}"
+      [[ "$b" == "$t" ]] && b="${t#out}"
+      case "$b" in
+        wrote|ran|sent|built|made|took|set|met|put|held|got|gave|left|told|brought|caught|found|kept|spent|dealt|began|drew|read|split|cut|shut|hit|let|won|lost|paid|said|saw|went|came|did|had|was|were) return 0 ;;
+      esac
+    ;;
+  esac
+  return 1
+}
+
 # Does the OPENING clause of a padded, lowercased description carry completed work?
 # Returns 0 when it does. Only the first five tokens count: "Retracting Finding 3 as I
 # wrote it" has a past tense verb, but it sits in a subordinate clause and the sentence
@@ -223,8 +251,8 @@ _desc_opens_past() {
           *" $p1 "*|*" $p2 "*|*" $p3 "*) p3="$p2"; p2="$p1"; p1="$tok"; continue ;;
         esac
         return 0 ;;
-      wrote|ran|sent|built|made|took|set|met|put|held|got|gave|left|told|brought|caught|found|kept|spent|dealt|began|drew|read|split|cut|shut|hit|let|won|lost|paid|said|saw|went|came|did|had|was|were)
-        return 0 ;;
+      *)
+        _desc_past_token "$tok" && return 0 ;;
     esac
     p3="$p2"; p2="$p1"; p1="$tok"
   done
@@ -324,10 +352,7 @@ _desc_refuse() {
     case " is are am being " in
       *" $ctok "*) return 0 ;;
     esac
-    case "$ctok" in
-      *ed) break ;;
-      wrote|ran|sent|built|made|took|set|met|put|held|got|gave|left|told|brought|caught|found|kept|spent|dealt|began|drew|read|split|cut|shut|hit|let|won|lost|paid|said|saw|went|came|did|had|was|were) break ;;
-    esac
+    _desc_past_token "$ctok" && break
   done
   # A numeral subject: "31018 is closed as not reproducible".
   case "$w" in ''|*[!0-9]*) ;; *) return 0 ;; esac

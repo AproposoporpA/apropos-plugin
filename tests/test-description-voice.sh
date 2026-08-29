@@ -293,4 +293,28 @@ assert_contains "$(last)" "Call with Blake" "a short real entry survives"
 next; said "v$s" "Rebuilt the Klaviyo template to be responsive and verified it at five widths."
 assert_contains "$(last)" "Rebuilt the Klaviyo template" "an infinitive to be survives"
 
+# --- REGRESSION (QA sixth review #30987, 2026-08-29) ----------------------------
+# The past-tense check matched irregular verbs as whole tokens, so every prefixed form
+# was invisible: "rebuilt" is not "built", "rewrote" is not "wrote", "resent" is not
+# "sent", "reset" is not "set". A real record of work opening with one of those and
+# carrying a copula in its opening clause was refused as a state report. All four
+# openers appear in the real record, so this is a live false positive, not a synthetic
+# one. Found while measuring, and reported by QA in the same round.
+
+# 52. A prefixed irregular past tense is still past tense.
+next; said "v$s" "Rewrote the config, is now live and serving traffic."
+assert_contains "$(last)" "Rewrote the config" "a re- prefixed irregular past tense survives"
+
+# 53. Another prefix, another base verb.
+next; said "v$s" "Rebuilt the queue, is now draining normally again."
+assert_contains "$(last)" "Rebuilt the queue" "rebuilt is recognised as past tense"
+
+# 54. And a third.
+next; said "v$s" "Resent the invoice, it is now delivered to the client."
+assert_contains "$(last)" "Resent the invoice" "resent is recognised as past tense"
+
+# 55. GUARD. Widening the past-tense check must not let a real state report through.
+next; said "v$s" "Status is now resolved for the affected merchant."
+assert_contains "$(last)" "needs description" "a state report is still refused"
+
 finish
