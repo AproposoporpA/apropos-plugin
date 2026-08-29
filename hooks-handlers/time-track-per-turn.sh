@@ -204,23 +204,29 @@ _desc_normalise() {
 # is still narration, while "Onboarding tasks were reassigned" carries its past tense up
 # front. Shared by the gerund rule and the quantifier openers. (#30987)
 _desc_opens_past() {
-  local tok prev="" seen=0
+  local tok p1="" p2="" p3="" seen=0
   for tok in $1; do
     seen=$((seen+1)); (( seen > 5 )) && break
     case "$tok" in
       *ed)
-        # A present copula in front of the participle makes it a state, not work:
+        # A PRESENT copula in front of the participle makes it a state, not work:
         # "Both programmes ARE connected" describes how things stand, while "Both
-        # files WERE regenerated" is work that happened. Measured on the record, the
-        # blunt form newly accepted a real state report. (#30987 QA round 3)
+        # files WERE regenerated" is work that happened.
+        #
+        # The copula is not always the word immediately before. An adverb sits between
+        # them constantly, and QA round 4 found that a single one defeated the check:
+        # "Both changes are NOW merged", "Both PRs are ALREADY approved", "Testing is
+        # ESSENTIALLY finished" all reached the invoice field. So look back three
+        # tokens, not one. "have been regenerated" is deliberately NOT blocked: present
+        # perfect passive reports work that was completed. (#30987 QA round 4)
         case " is are am be being " in
-          *" $prev "*) prev="$tok"; continue ;;
+          *" $p1 "*|*" $p2 "*|*" $p3 "*) p3="$p2"; p2="$p1"; p1="$tok"; continue ;;
         esac
         return 0 ;;
       wrote|ran|sent|built|made|took|set|met|put|held|got|gave|left|told|brought|caught|found|kept|spent|dealt|began|drew|read|split|cut|shut|hit|let|won|lost|paid|said|saw|went|came|did|had|was|were)
         return 0 ;;
     esac
-    prev="$tok"
+    p3="$p2"; p2="$p1"; p1="$tok"
   done
   return 1
 }
@@ -244,6 +250,9 @@ _desc_refuse() {
 
   # Second person. The field is read by a customer, not by the person being replied to.
   case "$p" in *" you "*|*" your "*|*" yours "*|*" youre "*) return 0 ;; esac
+  # Contracted forms survive the punctuation strip as two tokens, so match them on the
+  # normalised text instead. (#30987 QA round 4)
+  case "$l" in *"y'all"*|*"ya'll"*|*" yall "*|"yall "*) return 0 ;; esac
 
   # First-person analysis and retraction, which narrates thinking rather than work.
   case "$p" in
@@ -277,7 +286,10 @@ _desc_refuse() {
     *" $w "*)
       case "$l" in "$w,"*|"$w."*|"$w;"*|"$w:"*) return 0 ;; esac
       local second="${p#" $w "}"; second="${second%% *}"
-      case " with without on at for pending against " in
+      # A preposition where a noun phrase would go means the verdict takes no object.
+      # QA round 4 found the original short list let "approved by the client",
+      # "approved over email" and "blocked in review" through. (#30987)
+      case " with without on at for pending against by over during in into after before since under about " in
         *" $second "*) return 0 ;;
       esac
     ;;

@@ -224,4 +224,33 @@ assert_contains "$(last)" "needs description" "a present copula participle is no
 next; said "v$s" "Passed the release gate through stakeholder QA and handed it off with two documentation recommendations."
 assert_contains "$(last)" "Passed the release gate" "a verdict word with an object is an action"
 
+# --- REGRESSION (QA fourth review #30987, 2026-08-29) ---------------------------
+# QA failed the task again on Requirement 2. The copula guard added in round 3 only
+# looked at the token immediately before the participle, so a single intervening
+# adverb defeated it and a present-tense state report reached the invoice field on
+# both routes. Case 38a only exercised the zero-gap form, which is why the suite could
+# not see it: the same "a suite written alongside the filter proves what its author
+# thought of" pattern that failed round 3.
+
+# 40. One adverb between the copula and the participle.
+next; said "v$s" "Both changes are now merged and verified into the release branch."
+assert_contains "$(last)" "needs description" "an adverb between copula and participle is still a state"
+
+# 41. The same shape with a different adverb and quantifier.
+next; said "v$s" "Both PRs are already approved and merged ahead of the release."
+assert_contains "$(last)" "needs description" "already between copula and participle is still a state"
+
+# 42. And through the gerund opener, which shares the same helper.
+next; said "v$s" "Testing is essentially finished and the last case is still running."
+assert_contains "$(last)" "needs description" "a gerund opener with an adverbial copula is a state"
+
+# 43. The verdict-with-no-object rule missed common prepositions, so a bare verdict
+#     dressed in one slipped through.
+next; said "v$s" "approved by the client over email after the second review round."
+assert_contains "$(last)" "needs description" "a bare verdict behind any preposition is refused"
+
+# 44. Second person in its contracted form was not caught by the token check.
+next; said "v$s" "Y'all should check the totals before Monday morning arrives."
+assert_contains "$(last)" "needs description" "contracted second person is refused"
+
 finish
