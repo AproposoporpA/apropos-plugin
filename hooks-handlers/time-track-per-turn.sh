@@ -653,21 +653,6 @@ record_turn() {
   if [[ "$TASK" == "0" ]]; then
     printf 'apropos: no task was stated this turn and no .apropos-task marker was found in %s or above it, so this entry goes to your catch-all task. Correct it today, or put a .apropos-task file holding the task number at the top of that folder so the work attributes itself from now on.
 ' "${_optout_dir:-the working directory}" >&2
-    # ...and keep a running tally for the day, because one line of stderr on one turn is a
-    # single point of failure for a guarantee written in terms of a whole day. It scrolls,
-    # the session ends, nobody looks. Session start reads this back on every new session,
-    # so the day keeps being audited until the entries are corrected. (#30989 requirement 4)
-    #
-    # Local, not a query. No credentials and no database access ship in this plugin, so the
-    # day's audit is built from what the recorder itself saw.
-    #
-    # Never at the cost of the entry: recording the hour matters more than auditing it, so
-    # every failure here is swallowed.
-    {
-      mkdir -p "${HOME}/.claude/apropos-time" 2>/dev/null &&
-      printf '%s	%s	%s
-' "$(date -u +%H:%M:%S)" "${_optout_dir:-unknown}" "$DESC"         >> "${HOME}/.claude/apropos-time/catchall-$(date -u +%Y-%m-%d).tsv"
-    } 2>/dev/null || true
   fi
 
   # Worktype, best source first:
@@ -800,6 +785,45 @@ record_turn() {
   if [[ $MERGED -eq 0 && $DEDUP -eq 0 ]]; then
     q_enqueue "$QUEUE" "$PERSON" "$DESC" "$WT" "$TASK" "$PROJ" "$START"
     printf '%s|%s\n' "$NOW" "$SEG" > "$lastf"
+    # The day's tally, written HERE rather than beside the catch-all announcement,
+    # because only this branch actually creates an entry. At the announcement it also
+    # counted turns that were deduped away, so the audit reported more entries than
+    # exist, and an audit that overcounts is one people stop reading. (#30989 QA r2)
+    #
+    # Local, built from what the recorder saw. No credentials or database access ship
+    # in this plugin and an audit is not a reason to change that. Every failure is
+    # swallowed: recording the hour matters more than auditing it.
+    if [[ "$TASK" == "0" ]]; then
+      {
+        mkdir -p "${HOME}/.claude/apropos-time" 2>/dev/null &&
+        printf '%s	%s	%s
+' "$(date -u +%H:%M:%S)" "${_optout_dir:-unknown}" "$DESC" \
+          >> "${HOME}/.claude/apropos-time/catchall-$(date -u +%Y-%m-%d).tsv"
+      } 2>/dev/null || true
+    fi
+  fi
+
+
+  # Re-surface the day's running total from HERE, not only at session start. Session start
+  # fires on a new session, a resume, a clear or a compact, none of which a single unbroken
+  # session is guaranteed to hit, so a day spent in one session would see the total once and
+  # never again. This hook runs on every turn regardless. (#30989 QA round 2)
+  #
+  # Throttled to once an hour. A reminder on every turn is one people learn to scroll past,
+  # which is how it would quietly stop working.
+  if [[ "$TASK" == "0" ]]; then
+    _ca_file="${HOME}/.claude/apropos-time/catchall-$(date -u +%Y-%m-%d).tsv"
+    _ca_stamp="${HOME}/.claude/apropos-time/catchall-last-report"
+    if [[ -s "$_ca_file" ]]; then
+      _ca_last=0; [[ -s "$_ca_stamp" ]] && read -r _ca_last < "$_ca_stamp" 2>/dev/null
+      [[ "$_ca_last" =~ ^[0-9]+$ ]] || _ca_last=0
+      if (( NOW - _ca_last >= ${APROPOS_CATCHALL_REPORT_SECS:-3600} )); then
+        _ca_n=0; while read -r _ca_l; do [[ -n "$_ca_l" ]] && _ca_n=$((_ca_n+1)); done < "$_ca_file"
+        printf 'apropos: %s entries so far today have gone to your catch-all task instead of a client. They are listed in %s. Correct them before the day closes.
+' "$_ca_n" "$_ca_file" >&2
+        printf '%s' "$NOW" > "$_ca_stamp" 2>/dev/null || true
+      fi
+    fi
   fi
 
   # Consume the one-shot model files. Safe here because this line is reached only
