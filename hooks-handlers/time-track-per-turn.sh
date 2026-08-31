@@ -92,6 +92,11 @@ esac
 # dirname once per level before, and a subprocess costs about 525ms on the machine this
 # ships to, so a six-deep path spent several seconds of a per-turn budget that also has to
 # fit a network write. Reading a marker uses the read builtin for the same reason. (#30989)
+#
+# A marker is bounded to nine digits as well as being numeric. "A plain number" is not
+# the same as "a plausible id": real ones are five figures, and a corrupted file should
+# fail here, locally and visibly, rather than travel to the writer and land the hour
+# somewhere nobody will find it. (#30989 QA round 1)
 _dir_task=""; _dir_proj=""
 _optout_dir="$CWD"; [[ -z "$_optout_dir" && -s "$TRACK_DIR/cwd-$SID.txt" ]] && _optout_dir="$(cat "$TRACK_DIR/cwd-$SID.txt")"
 if [[ -n "$_optout_dir" ]]; then
@@ -101,12 +106,12 @@ if [[ -n "$_optout_dir" ]]; then
     if [[ -z "$_dir_task" && -s "$_d/.apropos-task" ]]; then
       _mv=""; read -r _mv < "$_d/.apropos-task" 2>/dev/null || _mv=""
       _mv="${_mv%$'\r'}"; _mv="${_mv#\#}"
-      [[ "$_mv" =~ ^[0-9]+$ ]] && _dir_task="$_mv"
+      [[ "$_mv" =~ ^[0-9]{1,9}$ ]] && _dir_task="$_mv"
     fi
     if [[ -z "$_dir_proj" && -s "$_d/.apropos-project" ]]; then
       _mv=""; read -r _mv < "$_d/.apropos-project" 2>/dev/null || _mv=""
       _mv="${_mv%$'\r'}"
-      [[ "$_mv" =~ ^[0-9]+$ ]] && _dir_proj="$_mv"
+      [[ "$_mv" =~ ^[0-9]{1,9}$ ]] && _dir_proj="$_mv"
     fi
     case "$_d" in
       */*) _d="${_d%/*}" ;;
@@ -648,6 +653,21 @@ record_turn() {
   if [[ "$TASK" == "0" ]]; then
     printf 'apropos: no task was stated this turn and no .apropos-task marker was found in %s or above it, so this entry goes to your catch-all task. Correct it today, or put a .apropos-task file holding the task number at the top of that folder so the work attributes itself from now on.
 ' "${_optout_dir:-the working directory}" >&2
+    # ...and keep a running tally for the day, because one line of stderr on one turn is a
+    # single point of failure for a guarantee written in terms of a whole day. It scrolls,
+    # the session ends, nobody looks. Session start reads this back on every new session,
+    # so the day keeps being audited until the entries are corrected. (#30989 requirement 4)
+    #
+    # Local, not a query. No credentials and no database access ship in this plugin, so the
+    # day's audit is built from what the recorder itself saw.
+    #
+    # Never at the cost of the entry: recording the hour matters more than auditing it, so
+    # every failure here is swallowed.
+    {
+      mkdir -p "${HOME}/.claude/apropos-time" 2>/dev/null &&
+      printf '%s	%s	%s
+' "$(date -u +%H:%M:%S)" "${_optout_dir:-unknown}" "$DESC"         >> "${HOME}/.claude/apropos-time/catchall-$(date -u +%Y-%m-%d).tsv"
+    } 2>/dev/null || true
   fi
 
   # Worktype, best source first:
