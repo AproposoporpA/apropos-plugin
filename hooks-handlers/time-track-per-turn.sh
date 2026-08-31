@@ -74,13 +74,49 @@ esac
 # having recorded nothing, and then Stop would have no cwd to test the marker against
 # and would record anyway.
 [[ -n "$CWD" ]] && printf '%s' "$CWD" > "$TRACK_DIR/cwd-$SID.txt" 2>/dev/null
+# ONE walk up the tree, collecting everything the directory can tell us. Three markers:
+#
+#   .apropos-notime    do not record this work at all
+#   .apropos-task      the task the work in this folder belongs to
+#   .apropos-project   the project it belongs to
+#
+# The task and project markers exist because a session that does not state its task books
+# the hour to the person's catch-all and says nothing: 28 of 40 entries and 3.33 of 5.08
+# hours on 2026-08-27, including a customer go-live confirmation and a client dashboard
+# republish. The folder knew every time, even when the session did not. (#30989)
+#
+# Walking UP means the FIRST marker found is the NEAREST, so a marker deeper in the tree
+# beats one at the client root. Only the first of each kind is taken.
+#
+# This is one walk, not three, and it uses bash string work rather than dirname. It called
+# dirname once per level before, and a subprocess costs about 525ms on the machine this
+# ships to, so a six-deep path spent several seconds of a per-turn budget that also has to
+# fit a network write. Reading a marker uses the read builtin for the same reason. (#30989)
+#
+# A marker is bounded to nine digits as well as being numeric. "A plain number" is not
+# the same as "a plausible id": real ones are five figures, and a corrupted file should
+# fail here, locally and visibly, rather than travel to the writer and land the hour
+# somewhere nobody will find it. (#30989 QA round 1)
+_dir_task=""; _dir_proj=""
 _optout_dir="$CWD"; [[ -z "$_optout_dir" && -s "$TRACK_DIR/cwd-$SID.txt" ]] && _optout_dir="$(cat "$TRACK_DIR/cwd-$SID.txt")"
 if [[ -n "$_optout_dir" ]]; then
-  _d="${_optout_dir//\\//}"
-  # Walk up from the working directory so a marker at an agent root covers its subdirs.
+  _d="${_optout_dir//\\//}"; _d="${_d%/}"
   while [[ -n "$_d" && "$_d" != "/" && "$_d" != "." ]]; do
-    if [[ -e "$_d/.apropos-notime" ]]; then exit 0; fi
-    _parent="$(dirname "$_d")"; [[ "$_parent" == "$_d" ]] && break; _d="$_parent"
+    [[ -e "$_d/.apropos-notime" ]] && exit 0
+    if [[ -z "$_dir_task" && -s "$_d/.apropos-task" ]]; then
+      _mv=""; read -r _mv < "$_d/.apropos-task" 2>/dev/null || _mv=""
+      _mv="${_mv%$'\r'}"; _mv="${_mv#\#}"
+      [[ "$_mv" =~ ^[0-9]{1,9}$ ]] && _dir_task="$_mv"
+    fi
+    if [[ -z "$_dir_proj" && -s "$_d/.apropos-project" ]]; then
+      _mv=""; read -r _mv < "$_d/.apropos-project" 2>/dev/null || _mv=""
+      _mv="${_mv%$'\r'}"
+      [[ "$_mv" =~ ^[0-9]{1,9}$ ]] && _dir_proj="$_mv"
+    fi
+    case "$_d" in
+      */*) _d="${_d%/*}" ;;
+      *)   break ;;
+    esac
   done
 fi
 
@@ -604,6 +640,21 @@ record_turn() {
   local TASK="0"; [[ -s "$taskf" ]] && TASK="$(tr -d '[:space:]#' < "$taskf")"; [[ "$TASK" =~ ^[0-9]+$ ]] || TASK="0"
   local PROJ="0"; [[ -s "$projf" ]] && PROJ="$(tr -d '[:space:]' < "$projf")"; [[ "$PROJ" =~ ^[0-9]+$ ]] || PROJ="0"
 
+  # The folder answers when the session did not. A session that states its own task still
+  # wins, so a marker never overrides a deliberate choice; it only fills a silence that
+  # would otherwise have become somebody else's invoice. (#30989)
+  if [[ "$TASK" == "0" && -n "$_dir_task" ]]; then TASK="$_dir_task"; fi
+  if [[ "$PROJ" == "0" && -n "$_dir_proj" ]]; then PROJ="$_dir_proj"; fi
+
+  # ...and when nothing answers, say so. Until now this was the silent path: TASK stayed 0,
+  # the writer applied the person's fallback task, and the first anyone knew was reading
+  # the timesheet days later. Client work booked as internal overhead under-bills the
+  # customer and misreports where the day went, so it is worth interrupting for. (#30989)
+  if [[ "$TASK" == "0" ]]; then
+    printf 'apropos: no task was stated this turn and no .apropos-task marker was found in %s or above it, so this entry goes to your catch-all task. Correct it today, or put a .apropos-task file holding the task number at the top of that folder so the work attributes itself from now on.
+' "${_optout_dir:-the working directory}" >&2
+  fi
+
   # Worktype, best source first:
   #   1. the file the model wrote this turn
   #   2. the worktype last used on this task, by any session on this machine
@@ -734,6 +785,45 @@ record_turn() {
   if [[ $MERGED -eq 0 && $DEDUP -eq 0 ]]; then
     q_enqueue "$QUEUE" "$PERSON" "$DESC" "$WT" "$TASK" "$PROJ" "$START"
     printf '%s|%s\n' "$NOW" "$SEG" > "$lastf"
+    # The day's tally, written HERE rather than beside the catch-all announcement,
+    # because only this branch actually creates an entry. At the announcement it also
+    # counted turns that were deduped away, so the audit reported more entries than
+    # exist, and an audit that overcounts is one people stop reading. (#30989 QA r2)
+    #
+    # Local, built from what the recorder saw. No credentials or database access ship
+    # in this plugin and an audit is not a reason to change that. Every failure is
+    # swallowed: recording the hour matters more than auditing it.
+    if [[ "$TASK" == "0" ]]; then
+      {
+        mkdir -p "${HOME}/.claude/apropos-time" 2>/dev/null &&
+        printf '%s	%s	%s
+' "$(date -u +%H:%M:%S)" "${_optout_dir:-unknown}" "$DESC" \
+          >> "${HOME}/.claude/apropos-time/catchall-$(date -u +%Y-%m-%d).tsv"
+      } 2>/dev/null || true
+    fi
+  fi
+
+
+  # Re-surface the day's running total from HERE, not only at session start. Session start
+  # fires on a new session, a resume, a clear or a compact, none of which a single unbroken
+  # session is guaranteed to hit, so a day spent in one session would see the total once and
+  # never again. This hook runs on every turn regardless. (#30989 QA round 2)
+  #
+  # Throttled to once an hour. A reminder on every turn is one people learn to scroll past,
+  # which is how it would quietly stop working.
+  if [[ "$TASK" == "0" ]]; then
+    _ca_file="${HOME}/.claude/apropos-time/catchall-$(date -u +%Y-%m-%d).tsv"
+    _ca_stamp="${HOME}/.claude/apropos-time/catchall-last-report"
+    if [[ -s "$_ca_file" ]]; then
+      _ca_last=0; [[ -s "$_ca_stamp" ]] && read -r _ca_last < "$_ca_stamp" 2>/dev/null
+      [[ "$_ca_last" =~ ^[0-9]+$ ]] || _ca_last=0
+      if (( NOW - _ca_last >= ${APROPOS_CATCHALL_REPORT_SECS:-3600} )); then
+        _ca_n=0; while read -r _ca_l; do [[ -n "$_ca_l" ]] && _ca_n=$((_ca_n+1)); done < "$_ca_file"
+        printf 'apropos: %s entries so far today have gone to your catch-all task instead of a client. They are listed in %s. Correct them before the day closes.
+' "$_ca_n" "$_ca_file" >&2
+        printf '%s' "$NOW" > "$_ca_stamp" 2>/dev/null || true
+      fi
+    fi
   fi
 
   # Consume the one-shot model files. Safe here because this line is reached only
