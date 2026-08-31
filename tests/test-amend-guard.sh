@@ -94,4 +94,22 @@ turn a5 "Placed the test order and sent the confirmation."
 assert_eq "1" "$(writes)" "the stretch stays one entry"
 assert_eq "1" "$(amends)" "amended rather than recorded twice"
 
+# 5. REGRESSION (QA #30988, 2026-08-28): a corrupt open-entry record must not amend
+#    blindly. It used to decode to an empty string, which read as "nothing to compare",
+#    so the amend went ahead and could discard a real correction.
+reset
+turn a6 "Opened the release checks for the package manifest."
+# corrupt the stored description field in place
+python - "$APROPOS_OPEN_FILE" <<'PY'
+import io,sys
+p=sys.argv[1]
+rows=[l for l in io.open(p,encoding="utf-8").read().split("\n") if l.strip()]
+parts=rows[0].split("\t"); parts[3]="!!!not-base64!!!"
+io.open(p,"w",encoding="utf-8",newline="").write("\t".join(parts)+"\n")
+PY
+printf 'Corrected by hand during the day.' > "$CORRECTED"
+turn a6 "Continued the release checks and recorded the outcome."
+assert_eq "2" "$(writes)" "a corrupt record inserts rather than amending blindly"
+assert_eq "0" "$(amends)" "and no amend was attempted at all"
+
 finish

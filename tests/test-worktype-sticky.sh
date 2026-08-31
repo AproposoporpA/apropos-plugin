@@ -17,6 +17,10 @@ export USERNAME="barrettgoldberg"
 TT="$WORK/claude-timetrack"; mkdir -p "$TT"
 export APROPOS_TRACK_DIR="$TT"
 chmod +x "$DIR/tests/mocks/mock-writer.sh"
+# Cases 6 and 7 exercise the shared task map directly, so source the helpers.
+source "$DIR/hooks-handlers/lib/queue.sh"
+taskwtf="$TT/task-worktype.tsv"
+eval "$(sed -n '/^task_wt_record()/,/^}/p;/^_tw_lock()/,/^}/p' "$DIR/hooks-handlers/time-track-per-turn.sh")"
 
 prompt(){ printf '{"hook_event_name":"UserPromptSubmit","session_id":"%s","cwd":"%s","prompt":"go"}' "$1" "${2:-/home/b/projects/thing}" | bash "$HOOK"; }
 stop(){ printf '{"hook_event_name":"Stop","session_id":"%s"}' "$1" | bash "$HOOK"; }
@@ -71,5 +75,26 @@ turn s4 "Corrected the API documentation for the release." 23
 printf '28765' > "$TT/task-s4.txt"
 turn s4 "Back on the customer request."
 assert_eq "30" "$(wt_of "$(tail -1 "$WRITER_LOG")")" "switching task picks up that task's worktype, not the last one used"
+
+
+# 6. REGRESSION (QA #30986, 2026-08-28): concurrent writers must not lose the map.
+#    The first version called q_lock once and gave up silently, keeping only 2 or 3 of
+#    20 writes. Under six to eight concurrent sessions that silently defeats case 3:
+#    the next session finds no history and falls back to Engineering.
+rm -f "$TT/task-worktype.tsv"
+( for i in $(seq 1 20); do ( task_wt_record "$((31000+i))" "$((30+i))" ) & done; wait ) 2>/dev/null
+kept="$(grep -c . "$TT/task-worktype.tsv" 2>/dev/null || echo 0)"
+assert_eq "20" "$kept" "20 concurrent writers on distinct tasks all kept ($kept survived)"
+
+# 7. The bare default is never recorded as though it were an established category.
+rm -f "$TT/task-worktype.tsv"
+: > "$WRITER_LOG"
+printf '39999' > "$TT/task-s9.txt"
+turn s9 "Started on something with no worktype and no history whatsoever."
+if grep -q '^39999' "$TT/task-worktype.tsv" 2>/dev/null; then
+  echo "  FAIL: the bare default was pinned into the task map"; _TEST_FAILS=$((_TEST_FAILS+1))
+else
+  pass "the bare default is not recorded as an established category"
+fi
 
 finish

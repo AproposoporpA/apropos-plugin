@@ -1,6 +1,6 @@
 # apropos — reliable Apropos time recording
 
-Records one Apropos start-marker every turn, with fallbacks and a durable local queue so time is never lost to a missing description or a flaky network.
+Records one Apropos start-marker per activity, being task plus work type plus project, with fallbacks and a durable local queue so time is never lost to a missing description or a flaky network.
 
 ## Install
 1. `/plugin marketplace add AproposoporpA/apropos-plugin`

@@ -76,6 +76,17 @@ turn s4 'Still no task' 13 0
 assert_eq "2" "$(wc -l < "$WRITER_LOG" | tr -d ' ')" "no-task turns still insert every time"
 assert_eq "0" "$(cat "$AMEND_LOG" 2>/dev/null | wc -l | tr -d ' ')" "no-task turns are never amended"
 
+# 5a. Two unattributed turns whose descriptions are BOTH refused must still record
+#     twice. The flagged placeholder is identical every time, so the same-everything
+#     dedup guard read two different turns as one repeated turn and dropped the second
+#     turn's time entirely. A placeholder is an admission that we do not know what the
+#     work was; it is not evidence that the work was the same. Surfaced by case 5 above
+#     once the description screen grew stricter. (#30987 QA round 3)
+rm -f "$WRITER_LOG" "$AMEND_LOG" "$APROPOS_OPEN_FILE"
+turn s4b 'No blocking concerns after the review of the payment changes' 13 0
+turn s4b 'Still waiting on the db owner before the migration can be run' 13 0
+assert_eq "2" "$(wc -l < "$WRITER_LOG" | tr -d ' ')" "two refused descriptions still record two entries"
+
 # 6. Past the window a fresh entry opens, so one row cannot absorb a whole day.
 rm -f "$WRITER_LOG" "$AMEND_LOG" "$APROPOS_OPEN_FILE"
 export APROPOS_MERGE_MAX_SECS=1

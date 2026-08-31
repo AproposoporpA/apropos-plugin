@@ -66,8 +66,19 @@ printf '%s' "$(( $(date -u +%s) - 600 ))" > "$TT/turnstart-s7.txt"   # pretend t
 printf 'Long running turn' > "$TT/description-s7.txt"; printf '13' > "$TT/worktype-s7.txt"
 stop s7
 STARTED="$(awk -F'|' '{print $6}' "$WRITER_LOG" | tail -1)"
-EXPECT="$(date -u -d '10 minutes ago' '+%Y-%m-%d %H:%M' 2>/dev/null || date -u -v-10M '+%Y-%m-%d %H:%M')"
-assert_contains "$STARTED" "$EXPECT" "start marker uses the stamped turn start, not the response end"
+# Epoch window, not a formatted minute. Building the expected string with date at
+# assert time raced the hook computing it at run time, so this failed whenever a
+# minute ticked between the two. Caught on the 0.2.4 release run at 16:29. The same
+# fix was applied to the two cases further down in 0.2.1; this one was missed.
+# Expect ~600s back, a minute of slack either side. A response-end time would land
+# near 0s back and still fail, so the case has not been weakened.
+STARTED_EPOCH="$(date -u -d "$STARTED" +%s 2>/dev/null)"
+BACK=$(( $(date -u +%s) - ${STARTED_EPOCH:-0} ))
+if [[ -n "$STARTED_EPOCH" && $BACK -ge 540 && $BACK -le 660 ]]; then
+  pass "start marker uses the stamped turn start, not the response end (${BACK}s back)"
+else
+  echo "  FAIL: start marker not taken from the stamp (got '$STARTED', ${BACK}s back)"; _TEST_FAILS=$((_TEST_FAILS+1))
+fi
 
 # 8. Recovery: Stop never fires (crash / Stop not registered) -> next prompt records it
 rm -f "$WRITER_LOG"

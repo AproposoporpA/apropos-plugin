@@ -186,37 +186,257 @@ APROPOS_BANNED='claude|anthropic|\bAI\b|assistant|chatbot|copilot'
 # they are matched by shape below instead.
 APROPOS_DERIVE_MIN="${APROPOS_DERIVE_MIN:-40}"
 
-# Punctuation the house style rules ban outright. Normalised rather than refused,
-# because an em dash in an otherwise good sentence should not cost the whole
-# description. Applies to every source. (#30987)
+# Punctuation the house style rules ban outright. Normalised rather than refused, and
+# done with bash parameter expansion rather than sed: this runs on every turn, and a
+# subprocess costs about half a second on the Windows shell this ships to. (#30987)
 _desc_normalise() {
-  printf '%s' "$1" | sed -e 's/—/-/g' -e 's/–/-/g' \
-                         -e "s/‘/'/g" -e "s/’/'/g" \
-                         -e 's/“/"/g' -e 's/”/"/g' \
-                         -e 's/…/.../g'
+  local s="$1"
+  s="${s//—/-}"; s="${s//–/-}"
+  s="${s//‘/\'}"; s="${s//’/\'}"
+  s="${s//“/\"}"; s="${s//”/\"}"
+  s="${s//…/...}"
+  printf '%s' "$s"
 }
 
-# Does this text read as a reply to Barrett rather than a record of the work? Returns 0
-# when it must NOT reach the field. Every example below reached a real entry between 24
-# and 27 August 2026 and had to be rewritten by hand before the time could be invoiced.
-# (#30987)
+# Is one token a past tense verb? Irregulars were matched as whole tokens, so every
+# prefixed form was invisible: "rebuilt" is not "built", "rewrote" is not "wrote",
+# "resent" is not "sent", "reset" is not "set". All four open real entries in the
+# record, and a record of work carrying a copula in the same clause was then refused as
+# a state report. Prefixes are stripped from a known short list rather than matching any
+# suffix, because "present" ends in "sent" and "asset" ends in "set". (#30987 QA round 6)
+_desc_past_token() {
+  local t="$1"
+  case "$t" in
+    *ed) return 0 ;;
+    wrote|ran|sent|built|made|took|set|met|put|held|got|gave|left|told|brought|caught|found|kept|spent|dealt|began|drew|read|split|cut|shut|hit|let|won|lost|paid|said|saw|went|came|did|had|was|were) return 0 ;;
+  esac
+  case "$t" in
+    re?*|un?*|over?*|under?*|mis?*|out?*)
+      local b="${t#re}"
+      [[ "$b" == "$t" ]] && b="${t#un}"
+      [[ "$b" == "$t" ]] && b="${t#over}"
+      [[ "$b" == "$t" ]] && b="${t#under}"
+      [[ "$b" == "$t" ]] && b="${t#mis}"
+      [[ "$b" == "$t" ]] && b="${t#out}"
+      case "$b" in
+        wrote|ran|sent|built|made|took|set|met|put|held|got|gave|left|told|brought|caught|found|kept|spent|dealt|began|drew|read|split|cut|shut|hit|let|won|lost|paid|said|saw|went|came|did|had|was|were) return 0 ;;
+      esac
+    ;;
+  esac
+  return 1
+}
+
+# Does the OPENING clause of a padded, lowercased description carry completed work?
+# Returns 0 when it does. Only the first five tokens count: "Retracting Finding 3 as I
+# wrote it" has a past tense verb, but it sits in a subordinate clause and the sentence
+# is still narration, while "Onboarding tasks were reassigned" carries its past tense up
+# front. Shared by the gerund rule and the quantifier openers. (#30987)
+_desc_opens_past() {
+  local tok p1="" p2="" p3="" seen=0
+  for tok in $1; do
+    seen=$((seen+1)); (( seen > 5 )) && break
+    case "$tok" in
+      *ed)
+        # A PRESENT copula in front of the participle makes it a state, not work:
+        # "Both programmes ARE connected" describes how things stand, while "Both
+        # files WERE regenerated" is work that happened.
+        #
+        # The copula is not always the word immediately before. An adverb sits between
+        # them constantly, and QA round 4 found that a single one defeated the check:
+        # "Both changes are NOW merged", "Both PRs are ALREADY approved", "Testing is
+        # ESSENTIALLY finished" all reached the invoice field. So look back three
+        # tokens, not one. "have been regenerated" is deliberately NOT blocked: present
+        # perfect passive reports work that was completed. (#30987 QA round 4)
+        case " is are am be being " in
+          *" $p1 "*|*" $p2 "*|*" $p3 "*) p3="$p2"; p2="$p1"; p1="$tok"; continue ;;
+        esac
+        return 0 ;;
+      *)
+        _desc_past_token "$tok" && return 0 ;;
+    esac
+    p3="$p2"; p2="$p1"; p1="$tok"
+  done
+  return 1
+}
+
+# Does this text read as a reply, a report or a finding rather than a record of the work?
+# Returns 0 when it must NOT reach the invoice field.
+#
+# Rewritten 2026-08-28 after QA failed #30987. The first version only inspected the FIRST
+# word, so the defect kept landing in other shapes: proper-noun and numeral subjects,
+# "there is" mid sentence, gerund narration, a lowercase verdict, and commit hashes. Of
+# 12 real entries recorded in the hour after it shipped, it refused none and 6 were still
+# defective. Every rule below is matched against real examples from that record.
+#
+# No subprocesses. Everything is bash string work.
 _desc_refuse() {
-  local s="$1"
+  local s="$1" l w p
+  l="${s,,}"
+  # Punctuation to spaces, padded, so a plain substring test gives word boundaries.
+  p=" ${l//[^a-z0-9]/ } "
+  p="${p//  / }"; p="${p//  / }"; p="${p//  / }"
+
   # Second person. The field is read by a customer, not by the person being replied to.
-  # "your three tasks are marked complete"
-  printf '%s' "$s" | grep -Eqi '(^|[^[:alnum:]])(you|your|yours|youre)([^[:alnum:]]|$)' && return 0
-  # A state or a finding rather than an outcome. This is how a reply opens, not a record.
-  # "The suite is 35 pass, 15 fail"
-  printf '%s' "$s" | grep -Eq '^(The|It|That|This|There|These|Those|Nothing|All|Both|Here)([^[:alnum:]]|$)' && return 0
-  # A count opening a sentence is the same shape: "Two of three closed out cleanly".
-  # Only when a lowercase word follows, so a proper noun is not refused: a description
-  # may legitimately open "One Horse product import ...".
-  printf '%s' "$s" | grep -Eq '^(One|Two|Three|Four|Five|Six|Seven|Eight|Nine|Ten)[[:space:]]+[a-z]' && return 0
-  # A verdict lifted out of a review, which says nothing about what was done.
-  # "Security review complete, APPROVED, no blocking concerns"
-  printf '%s' "$s" | grep -Eq '(^|[^[:alnum:]])(APPROVED|BLOCKED|PASSED|FAILED|PASS|FAIL)([^[:alnum:]]|$)' && return 0
-  # Internal draft identifiers. "Draft r4144661579774780226 to the client"
-  printf '%s' "$s" | grep -Eq '(^|[^[:alnum:]])r-?[0-9]{10,}([^[:alnum:]]|$)' && return 0
+  case "$p" in *" you "*|*" your "*|*" yours "*|*" youre "*) return 0 ;; esac
+  # Contracted forms survive the punctuation strip as two tokens, so match them on the
+  # normalised text instead. (#30987 QA round 4)
+  case "$l" in *"y'all"*|*"ya'll"*|*" yall "*|"yall "*) return 0 ;; esac
+
+  # First-person analysis and retraction, which narrates thinking rather than work.
+  case "$p" in
+    " i "*|*" i had "*|*" i have not "*|*" i cannot "*|*" i could not "*|*" i was wrong "*|*" i am not "*|*" i do not "*) return 0 ;;
+  esac
+
+  w="${l%% *}"; w="${w//[^a-z0-9]/}"
+  # A condition or a state, not an action.
+  case " the it that this there these those nothing here " in
+    *" $w "*) return 0 ;;
+  esac
+  # "all" and "both" are quantifiers, and in front of completed work they open an
+  # ordinary record: "Both files were regenerated and checked". They only signal a
+  # state when nothing in the opening clause is past tense, which is the same
+  # discriminator the gerund rule below already uses. QA round 3 found the blanket
+  # form throwing real entries away. (#30987)
+  case " all both " in
+    *" $w "*) _desc_opens_past "$p" || return 0 ;;
+  esac
+  # A verdict opening the sentence. The rule further down catches a verdict sitting
+  # after a comma or a colon, but one that OPENS the sentence has neither in front of
+  # it, so "approved, no blocking concerns" reached the invoice while "Security review
+  # complete, approved, ..." was refused. The upper case form was refused too, so the
+  # test case passed while the class it stands for did not. (#30987 QA round 3)
+  #
+  # A verdict word is also an ordinary transitive verb. "Passed the release gate
+  # through stakeholder QA and handed it off" is a real entry from the record and must
+  # survive. The discriminator is whether the word takes an object: a comma straight
+  # after it, or a preposition where a noun phrase would go, means it does not.
+  case " approved blocked passed failed rejected denied " in
+    *" $w "*)
+      case "$l" in "$w,"*|"$w."*|"$w;"*|"$w:"*) return 0 ;; esac
+      local second="${p#" $w "}"; second="${second%% *}"
+      # A preposition where a noun phrase would go means the verdict takes no object.
+      # QA round 4 found the original short list let "approved by the client",
+      # "approved over email" and "blocked in review" through. (#30987)
+      case " with without on at for pending against by over during in into after before since under about " in
+        *" $second "*) return 0 ;;
+      esac
+    ;;
+  esac
+  # State and finding openers. Each one announces a condition or an opinion rather
+  # than work that was done. Measured against 1151 real descriptions covering 25 days,
+  # not one opens with any of them, so this costs nothing. Before this, the screen
+  # refused "Everything downstream waits on a db owner" while accepting "Still waiting
+  # on the db owner", which made the rule arbitrary rather than principled: QA round 3
+  # ruled that the refusals were right and the equivalents had to follow. (#30987)
+  case " still currently not no looks seems appears waiting pending awaiting unable ready my " in
+    *" $w "*) return 0 ;;
+  esac
+  # A present tense copula in the opening clause, with nothing completed in front of
+  # it, is a state report whatever the subject is: "Status is now resolved", "Coverage
+  # is largely adequate", "Being now fully resolved, ...". This is general rather than
+  # another opener on a denylist, and QA round 5 is why. The round 4 copula guard was
+  # only ever REACHED from two gates, a "both"/"all" opener or an "-ing" opener, so any
+  # other subject skipped it, and "being" satisfies the -ing gate itself so a fourth
+  # adverb walked past the three token lookback. It also closes the noun-subject gap
+  # that had been disclosed and accepted since round 1.
+  #
+  # Scanned forward: a past tense verb reached first means the sentence is a record of
+  # work and the copula is only reporting what was found, so "Determined that the key
+  # audit is blocked" survives. "to be responsive" survives because "be" is not in the
+  # set and "Rebuilt" comes first anyway. Measured across 1151 real descriptions this
+  # refuses 8 more, and every one of them is either a finding or real work written in
+  # the present passive rather than the past tense the house rules ask for. (#30987)
+  local ctok cseen=0
+  for ctok in $p; do
+    cseen=$((cseen+1)); (( cseen > 5 )) && break
+    case " is are am being " in
+      *" $ctok "*) return 0 ;;
+    esac
+    _desc_past_token "$ctok" && break
+  done
+  # A numeral subject: "31018 is closed as not reproducible".
+  case "$w" in ''|*[!0-9]*) ;; *) return 0 ;; esac
+  # A count opening the sentence, but only before a lowercase word, so a proper noun
+  # such as "One Horse product import verified" is not refused.
+  case " one two three four five six seven eight nine ten " in
+    *" $w "*)
+      local rest="${s#* }"
+      # "One of my entries was ..." is a partitive, not a count opening a report. But
+      # the skip was written as "anything after of", which also swallowed the genuine
+      # count report "Two of three closed out cleanly" that this ticket claimed to
+      # catch. A partitive names things; a count report names another number.
+      # (#30987 QA round 3)
+      case "$rest" in
+        "of "*|"Of "*)
+          local after="${rest#* }"; after="${after%% *}"; after="${after//[^a-zA-Z0-9]/}"
+          after="${after,,}"
+          case " one two three four five six seven eight nine ten " in
+            *" $after "*) return 0 ;;
+          esac
+          case "$after" in ''|*[!0-9]*) ;; *) return 0 ;; esac
+          ;;
+        [a-z]*) return 0 ;;
+      esac
+    ;;
+  esac
+  # Gerund narration: "Retracting Finding 3...", "Correcting the report...". A completed
+  # record says "Retracted" or "Corrected".
+  #
+  # But plenty of ordinary work opens with an -ing NOUN: "Onboarding tasks were
+  # reassigned", "Billing report exported and reconciled". The discriminator is whether
+  # the sentence reports completed work at all, so only refuse when nothing in it is
+  # past tense. Every example here came out of the real record. (#30987 QA rework 2)
+  case "$w" in
+    *ing)
+      # Only the opening clause counts. "Retracting Finding 3 as I wrote it" has a past
+      # tense verb, but it sits in a subordinate clause and the sentence is still
+      # narration. "Onboarding tasks were reassigned" carries its past tense up front.
+      _desc_opens_past "$p" || return 0
+    ;;
+  esac
+
+  # A condition stated as the point of the sentence, which means at its start or straight
+  # after a colon. NOT as the object of completed work: "confirmed there is no guard for
+  # orders that already shipped" is a proper record and must survive. (#30987 QA rework 2)
+  case "$l" in
+    "there is"*|"there are"*|"there was"*|"there were"*) return 0 ;;
+    *": there is"*|*": there are"*|*": there was"*|*": there were"*) return 0 ;;
+  esac
+
+  # A verdict lifted out of a review. Matched in its report shape rather than as a bare
+  # word, so "deployed it after the full suite passed" is still allowed.
+  case "$l" in
+    *": approved"*|*", approved,"*|*", approved."*|*": blocked"*|*", blocked,"*|*", blocked."*) return 0 ;;
+  esac
+  # Shouted verdicts, as whole tokens. A substring test would also fire on BYPASS and
+  # COMPASS, and on PASSED inside ordinary prose.
+  local u=" ${s//[^A-Za-z0-9]/ } "
+  u="${u//  / }"; u="${u//  / }"; u="${u//  / }"
+  case "$u" in *" APPROVED "*|*" BLOCKED "*|*" PASS "*|*" FAIL "*|*" PASSED "*|*" FAILED "*) return 0 ;; esac
+
+  # Internal identifiers: draft ids, and commit hashes such as "committed as 55793a7".
+  local t
+  for t in $p; do
+    case "$t" in
+      r[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]*) return 0 ;;
+    esac
+    if [[ ${#t} -ge 7 && ${#t} -le 40 && "$t" != *[!0-9a-f]* && "$t" == *[a-f]* && "$t" == *[0-9]* ]]; then
+      return 0
+    fi
+  done
+
+  # Parity with the derived path: a file path or a reference to the tooling must never
+  # reach the field from either route. QA found these applied only to the derived text.
+  case "$l" in
+    *".ps1"*|*".sh"*|*".js"*|*".md"*|*".sql"*|*".json"*|*".html"*|*".jsonl"*|*".yaml"*|*".yml"*|*".py"*|*".csv"*|*".txt"*|*".bat"*|*".cmd"*|*".php"*|*".xlsx"*) return 0 ;;
+    # Any backslash at all. Measured across 550 real descriptions from ten days: not one
+    # contains a backslash, so this costs nothing and catches every Windows and UNC path
+    # shape without trying to enumerate them. (#30987 QA rework 2)
+    *\\*) return 0 ;;
+    */[a-z0-9_.-]*/[a-z0-9_.-]*) return 0 ;;
+  esac
+  case "$p" in *" claude "*|*" anthropic "*|*" ai "*|*" assistant "*|*" chatbot "*|*" copilot "*|*" agent "*|*" subagent "*) return 0 ;; esac
+
   return 1
 }
 
@@ -300,7 +520,12 @@ task_wt_record() {
   [[ "$t" =~ ^[0-9]+$ ]] && [[ "$t" != "0" ]] || return 0
   [[ "$w" =~ ^[0-9]+$ ]] || return 0
   mkdir -p "$(dirname "$taskwtf")" 2>/dev/null || true
-  q_lock "$taskwtf" || return 0
+  # Retry rather than give up on the first miss. QA measured the single-attempt version
+  # keeping only 2 or 3 of 20 concurrent writes, which silently defeats the whole point
+  # of the map: the next session finds nothing and falls back to Engineering. _oe_lock is
+  # the same bounded retry the open-entry map already uses, added after this identical
+  # failure mode lost real data. Reusing it rather than repeating the mistake. (#30986)
+  _tw_lock "$taskwtf" || return 0
   tmp="$taskwtf.tmp.$$"
   {
     if [[ -s "$taskwtf" ]]; then
@@ -316,6 +541,19 @@ task_wt_record() {
   } > "$tmp" 2>/dev/null && mv "$tmp" "$taskwtf" 2>/dev/null
   rm -f "$tmp" 2>/dev/null || true
   q_unlock "$taskwtf"
+}
+
+# Bounded retry around the shared task map, mirroring _oe_lock in lib/writer.sh. Kept
+# local to this file because writer.sh's copy is bound to APROPOS_OPEN_FILE. (#30986)
+_tw_lock() {
+  local f="$1" i=0
+  command -v q_lock >/dev/null 2>&1 || return 1
+  while (( i < 50 )); do
+    q_lock "$f" && return 0
+    sleep 0.1
+    i=$((i+1))
+  done
+  return 1
 }
 
 record_turn() {
@@ -394,7 +632,15 @@ record_turn() {
 ' "$TASK" >&2
   fi
   printf '%s' "$WT" > "$stickywtf" 2>/dev/null || true
-  task_wt_record "$TASK" "$WT"
+  # Only a chosen worktype is worth remembering for the task. Recording the bare default
+  # would pin a guess into the shared map as though somebody had established it, and
+  # every later session would then inherit the guess with no warning. (#30986)
+  # NOT recorded here. task_wt_record can now genuinely retry for the lock, and this runs
+  # before the entry is queued, so at high contention a slow lock would gate the write
+  # that actually reaches the invoice. QA measured a 38s worst case at 20 concurrent
+  # sessions against a 30s hook timeout, which would drop the whole turn rather than
+  # merely lose a worktype hint. The map is a convenience; the time is not. Recorded at
+  # the end of record_turn instead, once the entry is safely queued. (#30986 QA)
 
   # Dedup key now includes the description fingerprint. Previously the key was
   # worktype|task|project only, so two consecutive turns of different work on the
@@ -431,7 +677,17 @@ record_turn() {
       # work, and an entry with no task cannot be amended without dropping attribution.
       if [[ "$TASK" != "0" ]]; then
         local open id
-        if open="$(oe_lookup "$ACT")"; then
+        # No entry open yet for this activity? Claim it before inserting, so a second
+        # session starting the same brand-new activity in the same window waits for this
+        # one's id instead of inserting a second row for the same work. If the claim is
+        # refused, somebody else got there first, so wait for their id and amend that.
+        # (#30903)
+        if ! oe_lookup "$ACT" >/dev/null 2>&1; then
+          if ! oe_claim "$ACT"; then
+            open="$(oe_await "$ACT" 2>/dev/null)" || open=""
+          fi
+        fi
+        if [[ -n "$open" ]] || open="$(oe_lookup "$ACT")"; then
           id="${open%% *}"
           # Third field is what this recorder last wrote for that entry. Pass it back so
           # the writer can refuse the amend if the row has been corrected since. A refusal
@@ -439,8 +695,21 @@ record_turn() {
           # overwriting somebody's correction or being lost. (#30988)
           local expect_b64 expect=""
           expect_b64="$(printf '%s' "$open" | awk '{print $3}')"
-          [[ -n "$expect_b64" ]] && expect="$(printf '%s' "$expect_b64" | base64 -d 2>/dev/null)"
-          if amend_entry "$id" "$PERSON" "$DESC" "$expect"; then MERGED=1; fi
+          local amend_ok=1
+          if [[ -n "$expect_b64" ]]; then
+            # A corrupt field decodes to an empty string, and an empty expectation used to
+            # mean "nothing to compare", so the amend went ahead unconditionally and could
+            # discard a real correction: the very bug this guard exists to prevent, back
+            # again for that one row. Exit status alone is not a reliable gate, since a
+            # valid but unpadded value also returns 1, so require a clean round trip.
+            # Anything else refuses the amend, which falls back to inserting. (#30988 QA)
+            expect="$(printf '%s' "$expect_b64" | base64 -d 2>/dev/null)"
+            if [[ "$(printf '%s' "$expect" | base64 | tr -d '\n')" != "$expect_b64" ]]; then
+              amend_ok=0
+              printf 'apropos: the open-entry record for this activity is unreadable, so the entry was recorded separately rather than risk overwriting a correction.\n' >&2
+            fi
+          fi
+          if (( amend_ok )) && amend_entry "$id" "$PERSON" "$DESC" "$expect"; then MERGED=1; fi
         fi
       fi
       ;;
@@ -450,7 +719,13 @@ record_turn() {
   # identical turn inside 15 minutes does not open a second entry.
   local SEG="$WT|$TASK|$PROJ|$(_hash "$DESC")"
   local DEDUP=0
-  if [[ -f "$lastf" ]]; then
+  # ...but never on the flagged placeholder. The placeholder is identical every time it
+  # is written, so two different turns that both failed to produce a usable description
+  # looked like one repeated turn and the second turn's time was dropped outright. A
+  # placeholder is an admission that we do not know what the work was; it is not
+  # evidence that the work was the same. The stricter description screen made this
+  # reachable in ordinary use rather than rarely. (#30987 QA round 3)
+  if [[ -f "$lastf" && "$DESC" != "[needs description]"* ]]; then
     local line lt lk
     line="$(head -1 "$lastf")"; lt="${line%%|*}"; lk="${line#*|}"
     if [[ "$lt" =~ ^[0-9]+$ && "$lk" == "$SEG" && $((NOW - lt)) -lt 900 ]]; then DEDUP=1; fi
@@ -464,6 +739,10 @@ record_turn() {
   # Consume the one-shot model files. Safe here because this line is reached only
   # after the entry was enqueued, or after it was confirmed a true duplicate
   # (identical description AND segment within 15 min). Nothing unrecorded is lost.
+  # Safe to do now: the entry is queued, so a slow lock here can cost the worktype hint
+  # for the next session but can never cost the time itself. (#30986 QA)
+  [[ "$WTSRC" != "default" ]] && task_wt_record "$TASK" "$WT"
+
   rm -f "$descf" "$wtf" 2>/dev/null || true
 }
 
