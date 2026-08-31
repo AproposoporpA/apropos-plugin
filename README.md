@@ -14,6 +14,17 @@ Records one Apropos start-marker per activity, being task plus work type plus pr
 - Backdates the start to the prompt; skips only exact-duplicate segments (<15 min).
 - If the write fails or `R:`/network is down, the entry is queued locally (`~/.claude/apropos-time/`) and flushed on a later turn.
 
+## Attribution
+Every hour has to reach the client or internal account it belongs to. A session normally states its own task, and when it does that always wins. When it does not, the folder answers, so client work attributes itself without anyone remembering.
+
+Drop one of these files at the top of a folder and every subfolder inherits it. The nearest one wins, so a marker deeper in the tree overrides one at the client root.
+
+- `.apropos-task` holding a task number, for example `26137`. A leading `#` is fine.
+- `.apropos-project` holding a project id, for the work that belongs to a project rather than a task.
+- `.apropos-notime` holding nothing, to stop recording in that tree entirely. Scheduled and headless runs are nobody's working time.
+
+Anything that is not a plain number is ignored rather than guessed at. When no task is stated and no marker is found, the entry still records against your catch-all task and the recorder says so on the spot, so it can be corrected the same day instead of being discovered on a timesheet a week later.
+
 ## Security
 No credentials or database access ship in this repo. The credentialed write lives only in the internal `R:` skill (`Record-Time.ps1`), reachable on the RICO network. Off-network entries queue and flush later; a downloaded copy of this plugin cannot write to Apropos.
 

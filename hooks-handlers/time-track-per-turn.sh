@@ -74,13 +74,44 @@ esac
 # having recorded nothing, and then Stop would have no cwd to test the marker against
 # and would record anyway.
 [[ -n "$CWD" ]] && printf '%s' "$CWD" > "$TRACK_DIR/cwd-$SID.txt" 2>/dev/null
+# ONE walk up the tree, collecting everything the directory can tell us. Three markers:
+#
+#   .apropos-notime    do not record this work at all
+#   .apropos-task      the task the work in this folder belongs to
+#   .apropos-project   the project it belongs to
+#
+# The task and project markers exist because a session that does not state its task books
+# the hour to the person's catch-all and says nothing: 28 of 40 entries and 3.33 of 5.08
+# hours on 2026-08-27, including a customer go-live confirmation and a client dashboard
+# republish. The folder knew every time, even when the session did not. (#30989)
+#
+# Walking UP means the FIRST marker found is the NEAREST, so a marker deeper in the tree
+# beats one at the client root. Only the first of each kind is taken.
+#
+# This is one walk, not three, and it uses bash string work rather than dirname. It called
+# dirname once per level before, and a subprocess costs about 525ms on the machine this
+# ships to, so a six-deep path spent several seconds of a per-turn budget that also has to
+# fit a network write. Reading a marker uses the read builtin for the same reason. (#30989)
+_dir_task=""; _dir_proj=""
 _optout_dir="$CWD"; [[ -z "$_optout_dir" && -s "$TRACK_DIR/cwd-$SID.txt" ]] && _optout_dir="$(cat "$TRACK_DIR/cwd-$SID.txt")"
 if [[ -n "$_optout_dir" ]]; then
-  _d="${_optout_dir//\\//}"
-  # Walk up from the working directory so a marker at an agent root covers its subdirs.
+  _d="${_optout_dir//\\//}"; _d="${_d%/}"
   while [[ -n "$_d" && "$_d" != "/" && "$_d" != "." ]]; do
-    if [[ -e "$_d/.apropos-notime" ]]; then exit 0; fi
-    _parent="$(dirname "$_d")"; [[ "$_parent" == "$_d" ]] && break; _d="$_parent"
+    [[ -e "$_d/.apropos-notime" ]] && exit 0
+    if [[ -z "$_dir_task" && -s "$_d/.apropos-task" ]]; then
+      _mv=""; read -r _mv < "$_d/.apropos-task" 2>/dev/null || _mv=""
+      _mv="${_mv%$'\r'}"; _mv="${_mv#\#}"
+      [[ "$_mv" =~ ^[0-9]+$ ]] && _dir_task="$_mv"
+    fi
+    if [[ -z "$_dir_proj" && -s "$_d/.apropos-project" ]]; then
+      _mv=""; read -r _mv < "$_d/.apropos-project" 2>/dev/null || _mv=""
+      _mv="${_mv%$'\r'}"
+      [[ "$_mv" =~ ^[0-9]+$ ]] && _dir_proj="$_mv"
+    fi
+    case "$_d" in
+      */*) _d="${_d%/*}" ;;
+      *)   break ;;
+    esac
   done
 fi
 
@@ -603,6 +634,21 @@ record_turn() {
   # be inherited from the task.
   local TASK="0"; [[ -s "$taskf" ]] && TASK="$(tr -d '[:space:]#' < "$taskf")"; [[ "$TASK" =~ ^[0-9]+$ ]] || TASK="0"
   local PROJ="0"; [[ -s "$projf" ]] && PROJ="$(tr -d '[:space:]' < "$projf")"; [[ "$PROJ" =~ ^[0-9]+$ ]] || PROJ="0"
+
+  # The folder answers when the session did not. A session that states its own task still
+  # wins, so a marker never overrides a deliberate choice; it only fills a silence that
+  # would otherwise have become somebody else's invoice. (#30989)
+  if [[ "$TASK" == "0" && -n "$_dir_task" ]]; then TASK="$_dir_task"; fi
+  if [[ "$PROJ" == "0" && -n "$_dir_proj" ]]; then PROJ="$_dir_proj"; fi
+
+  # ...and when nothing answers, say so. Until now this was the silent path: TASK stayed 0,
+  # the writer applied the person's fallback task, and the first anyone knew was reading
+  # the timesheet days later. Client work booked as internal overhead under-bills the
+  # customer and misreports where the day went, so it is worth interrupting for. (#30989)
+  if [[ "$TASK" == "0" ]]; then
+    printf 'apropos: no task was stated this turn and no .apropos-task marker was found in %s or above it, so this entry goes to your catch-all task. Correct it today, or put a .apropos-task file holding the task number at the top of that folder so the work attributes itself from now on.
+' "${_optout_dir:-the working directory}" >&2
+  fi
 
   # Worktype, best source first:
   #   1. the file the model wrote this turn

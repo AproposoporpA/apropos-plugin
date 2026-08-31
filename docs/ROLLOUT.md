@@ -54,6 +54,7 @@ your name with a real description (worktype auto-selected).
   entry; a new one opens when the activity changes or after 30 minutes. Open
   entries are shared across concurrent sessions, so running several at once still
   gives one entry per activity rather than one per session.
+- Work done inside a folder carrying a `.apropos-task` file is attributed to that task automatically, and every subfolder inherits it. If your session states its own task that still wins. When neither exists the entry goes to your catch-all as before, but the recorder now tells you at the time rather than leaving you to find it on the timesheet.
 - If a write fails or the network blips, the entry is queued locally
   (`~/.claude/apropos-time/`) and flushed on the next turn or at next session start —
   no lost time.
