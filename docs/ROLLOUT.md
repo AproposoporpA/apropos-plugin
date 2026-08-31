@@ -8,8 +8,9 @@ pasted into your `CLAUDE.md`, and it quietly dropped time in a bunch of cases �
 Claude didn't write a description that turn, if the network hiccuped, or if the write
 timed out, nothing got recorded.
 
-The plugin fixes that. It records one time entry every turn (a start-marker,
-backdated a minute, with duplicate segments skipped), and if a write ever fails it
+The plugin fixes that. It records one time entry per activity, being the task, the
+work type and the project together, so continuing the same work extends the entry
+already open instead of opening another beside it. If a write ever fails it
 queues the entry locally and delivers it later — so **time doesn't get lost anymore**.
 Install is now a few slash commands instead of manual file edits, and setup cleans up
 the old hook/convention automatically so nothing double-records.
@@ -48,8 +49,11 @@ convention. Do one normal turn, then check Apropos — you should see one entry 
 your name with a real description (worktype auto-selected).
 
 ## What you get
-- One time entry recorded every turn (start-marker), backdated 60s, duplicate
-  segments skipped.
+- One time entry recorded per activity, being task plus work type plus project,
+  backdated to when the work started. Continuing the same activity extends that
+  entry; a new one opens when the activity changes or after 30 minutes. Open
+  entries are shared across concurrent sessions, so running several at once still
+  gives one entry per activity rather than one per session.
 - If a write fails or the network blips, the entry is queued locally
   (`~/.claude/apropos-time/`) and flushed on the next turn or at next session start —
   no lost time.
