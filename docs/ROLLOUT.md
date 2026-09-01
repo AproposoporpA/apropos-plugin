@@ -64,6 +64,11 @@ your name with a real description (worktype auto-selected).
 ## Trouble
 - No entries appearing: confirm `R:` is mapped and you're on the network; confirm
   `apropos` shows in `/plugin`.
-- Seeing `[needs description] <project>` entries: that's the fallback when a specific
-  description wasn't written that turn — filter on `[needs description]` in Apropos to
-  reassign/clean them.
+- Seeing flagged entries: both need a hand-written line before the time can be invoiced,
+  and the wording says which of two things happened.
+  - `[needs description] <project>` — no description was written that turn.
+  - `[rewrite description] <project>` — one was written and the screen judged it unfit
+    for a customer invoice.
+  Filter on either string in Apropos to reassign or clean them. Filter on them separately
+  to see what the screen is actually costing, which is a different problem from sessions
+  not writing descriptions and has a different fix.

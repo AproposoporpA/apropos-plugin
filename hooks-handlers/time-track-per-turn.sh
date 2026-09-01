@@ -149,6 +149,33 @@ NOW="$(date -u +%s)"
 # signal. Cap here so the boundary is visible and consistent.
 DESC_MAX=255
 
+# Two flag wordings, because a flagged entry has two causes and they call for opposite
+# responses. A description was written and the screen judged it unfit for a customer
+# invoice, or nothing was written and there was nothing to judge. The first is the cost
+# of protecting the invoice; the second is a session that did not do its job. Recording
+# both as the same words made the placeholder rate uncountable, which is what blocked
+# #31065 and #31068 from being sized against anything real. (#31098)
+#
+# Constraints on any wording chosen here: it reaches a customer invoice, so it must name
+# no tooling and read as an instruction to the person holding the timesheet; it must fit
+# inside DESC_MAX whole; and the two must not share a prefix, or a count cannot separate
+# them. Kept as constants rather than literals because the dedup guard, the audit and
+# the tests all have to agree on them.
+DESC_PH_NONE="[needs description]"
+DESC_PH_REJECTED="[rewrite description]"
+
+# Is this description one of the flags rather than a record of work? Used by the dedup
+# guard, which must exempt EVERY flag: a flag is an admission that we do not know what
+# the work was, not evidence that two turns were the same. Written as a function over
+# both constants so adding a third wording cannot silently reintroduce the dropped-time
+# defect that #30987 QA round 3 found. (#31098)
+_desc_is_placeholder() {
+  case "$1" in
+    "$DESC_PH_NONE"*|"$DESC_PH_REJECTED"*) return 0 ;;
+  esac
+  return 1
+}
+
 _hash() {
   # Short fingerprint of the description, so dedup can tell "same activity
   # re-marked" from "new work at the same worktype/task".
@@ -602,6 +629,11 @@ record_turn() {
   #   3. a flagged placeholder
   # Never the raw prompt, which describes the request rather than the work done.
   local DESC=""
+  # Whether the screen threw away a description this turn. The recorder has always known
+  # this at the moment of refusal and then discarded it before writing the entry, which
+  # is the entire defect: the two causes of a flagged entry became indistinguishable in
+  # the record. Carried to the placeholder rather than stored anywhere new. (#31098)
+  local REFUSED=0
   if [[ -s "$descf" ]]; then
     DESC="$(_desc_normalise "$(cat "$descf")")"
     # A supplied description is held to the same standard as a derived one. Refusing it
@@ -610,6 +642,7 @@ record_turn() {
     if _desc_refuse "$DESC"; then
       printf 'apropos: the description written this turn reads as a reply rather than a record of the work, so it was not used. Rewrite it in the past tense, from your own perspective, saying what was accomplished.\n' >&2
       DESC=""
+      REFUSED=1
     fi
   fi
   local basecwd="$CWD"
@@ -622,15 +655,25 @@ record_turn() {
     *) [[ -z "${DESC//[[:space:]]/}" ]] && DESC="$(desc_from_transcript "$basecwd" 2>/dev/null)" ;;
   esac
   if [[ -z "${DESC//[[:space:]]/}" ]]; then
+    # Which flag. A refused TRANSCRIPT is not a rejection: the transcript is a salvage
+    # attempt, not a description the session wrote, so it stays the never-written cause.
+    # Counting it against the screen would inflate the one number this exists to make
+    # trustworthy. Only a description the session actually wrote can be rejected.
+    local ph="$DESC_PH_NONE"
+    (( REFUSED )) && ph="$DESC_PH_REJECTED"
     local proj; proj="$(basename "$basecwd" 2>/dev/null)"
     # Do not tag the placeholder with a project name that is itself an AI reference.
     # "R:\Barrett Goldberg\Claude" would otherwise write "[needs description] Claude"
     # onto a field that reaches client invoices.
     if printf '%s' "$proj" | grep -Eqi "$APROPOS_BANNED"; then proj=""; fi
     if [[ -n "$proj" && "$proj" != "." && "$proj" != "/" ]]; then
-      DESC="[needs description] $proj"
+      DESC="$ph $proj"
+      # A folder name long enough to push the flag past the cap would otherwise be cut
+      # mid-word by the truncation below, leaving a ragged half-word on an invoice. The
+      # flag is the part that matters, so the folder is what gives way. (#31098)
+      (( ${#DESC} > DESC_MAX )) && DESC="$ph"
     else
-      DESC="[needs description]"
+      DESC="$ph"
     fi
   fi
   DESC="${DESC:0:$DESC_MAX}"
@@ -776,7 +819,13 @@ record_turn() {
   # placeholder is an admission that we do not know what the work was; it is not
   # evidence that the work was the same. The stricter description screen made this
   # reachable in ordinary use rather than rarely. (#30987 QA round 3)
-  if [[ -f "$lastf" && "$DESC" != "[needs description]"* ]]; then
+  #
+  # Written against the LITERAL string until #31098 added a second wording. The second
+  # wording did not share the prefix, so it fell straight back INTO dedup and two
+  # rejected turns inside the window recorded once: the exact time-losing defect this
+  # guard exists to prevent, reintroduced by adding a flag. Asking the predicate instead
+  # of matching a string means a third wording cannot do it again.
+  if [[ -f "$lastf" ]] && ! _desc_is_placeholder "$DESC"; then
     local line lt lk
     line="$(head -1 "$lastf")"; lt="${line%%|*}"; lk="${line#*|}"
     if [[ "$lt" =~ ^[0-9]+$ && "$lk" == "$SEG" && $((NOW - lt)) -lt 900 ]]; then DEDUP=1; fi
