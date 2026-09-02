@@ -36,7 +36,13 @@ silent(){ prompt "$1" "$2"; stop "$1"; }
 field(){ printf '%s' "$1" | awk -F'|' -v n="$2" '{print $n}'; }
 last(){ field "$(tail -1 "$WRITER_LOG")" 2; }
 
-if ! command -v jq >/dev/null 2>&1; then echo "  SKIP: jq not present"; finish; fi
+# A skip is not a pass. finish() prints "ALL TESTS PASSED" and exits 0, so calling it here
+# reported a green file that had asserted nothing at all, which is the shape of a test that
+# quietly stops protecting anything. Exit non-zero instead and say what was not run.
+if ! command -v jq >/dev/null 2>&1; then
+  echo "  SKIP: jq not present, so NOTHING in this file ran. Not a pass."
+  echo "TESTS FAILED (1)"; exit 1
+fi
 
 # The fast harness first. It fires adversarial text straight at the constants and the
 # predicate in milliseconds, and on this codebase that is where text defects are actually
@@ -114,6 +120,25 @@ next; silent "c$s"
 LINE="$(tail -1 "$WRITER_LOG")"
 assert_eq "13" "$(field "$LINE" 3)" "never-written cause still records the worktype"
 assert_eq "31098" "$(field "$LINE" 4)" "never-written cause still records the task"
+
+# The prompt for correction is on the error stream, and requirement 3 is to PRESERVE it.
+# Pinned to the rejected branch specifically: the flag alone tells the person reading the
+# timesheet what happened, and this tells the session what to do about it in the moment.
+next
+prompt "c$s"
+printf '%s' "Your review is complete and approved without concerns." > "$TT/description-c$s.txt"
+ERRTXT="$(stop "c$s" 2>&1 >/dev/null)"
+assert_contains "$ERRTXT" "was not used" "a rejected description still prompts the session to rewrite it"
+assert_contains "$(last)" "$PH_REJ" "and the same turn still records the rejected flag"
+
+# The AI-name guard drops the project tag on BOTH branches. It was only ever exercised on
+# the never-written branch, so the rejected branch could have shipped "[rewrite
+# description] Claude" onto a field that reaches a customer invoice.
+next
+prompt "c$s" "R:\\Barrett Goldberg\\Claude"
+printf '%s' "Your review is complete and approved without concerns." > "$TT/description-c$s.txt"
+stop "c$s"
+assert_eq "$PH_REJ" "$(last)" "AI-named project is dropped from the REJECTED flag too"
 
 for ph in "$PH_NONE" "$PH_REJ"; do
   if printf '%s' "$ph" | grep -Eq '^\[[^]]+\]$'; then
