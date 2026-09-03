@@ -64,6 +64,34 @@ your name with a real description (worktype auto-selected).
 ## Trouble
 - No entries appearing: confirm `R:` is mapped and you're on the network; confirm
   `apropos` shows in `/plugin`.
-- Seeing `[needs description] <project>` entries: that's the fallback when a specific
-  description wasn't written that turn — filter on `[needs description]` in Apropos to
-  reassign/clean them.
+- Seeing flagged entries: both need a hand-written line before the time can be invoiced,
+  and the wording says which of two things happened.
+  - `[needs description] <project>`, no description was written that turn.
+  - `[rewrite description] <project>`, one was written and the screen judged it unfit
+    for a customer invoice.
+
+  From 0.2.6 onward those are two different causes and they have different fixes: the
+  first is a session that did not do its job, the second is what the screen costs. Before
+  0.2.6 there was only one wording, `[needs description]`, and it covered BOTH causes, so
+  no entry recorded before the 0.2.6 install can be attributed to either one. Do not read
+  an old entry as "no description was written".
+
+  **Do not filter on these with a bare `LIKE`.** In T-SQL, `[` opens a character class,
+  so `LIKE '%[needs description]%'` matches any row containing any one of those letters,
+  which is every row. Measured on the live record: the bare form returned 521 of 521 for
+  both flags, while the escaped form returned the true 10. Escape the bracket, or use
+  `CHARINDEX`, which has no wildcard syntax at all:
+
+  ```sql
+  WHERE WorkDescription LIKE '%[[]needs description]%'      -- escaped, correct
+  WHERE CHARINDEX('[rewrite description]', WorkDescription) > 0   -- no escaping needed
+  ```
+
+  The same trap applies to any search box that passes your text into a `LIKE`. If a
+  filter returns suspiciously many rows, that is what happened.
+
+  Easier: `Measure-LivePlaceholderRate.ps1`, under
+  `R:\Intranet\ClaudeAI\plans\apropos-plugin-per-turn-fix\`, already escapes correctly and
+  reports the two causes separately, with everything recorded before the split counted as
+  cause unknown rather than guessed into a bucket. Pass `-DistinguishableSince` with the
+  0.2.6 install time to get the split.

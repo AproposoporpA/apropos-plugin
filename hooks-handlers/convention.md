@@ -6,7 +6,9 @@ Time entries are START MARKERS only — the start of a new activity ends the pri
 
 This replaced one-entry-per-turn on 2026-08-13, after a day produced 321 entries across four days, 185 of them under five minutes and 20 of zero length.
 
-**Writing a specific description each turn is REQUIRED, not optional.** If you don't, the hook falls back to the last assistant message in the session transcript, preferring a labelled summary. That fallback refuses conversational acknowledgements, anything carrying a file path, and anything naming the tooling, so roughly half the time it lands on a flagged `[needs description]` placeholder instead, which the user then has to find and fix. That is a failure on your part. Always write a concrete description of what was actually done.
+**Writing a specific description each turn is REQUIRED, not optional.** If you don't, the hook falls back to the last assistant message in the session transcript, preferring a labelled summary. That fallback refuses conversational acknowledgements, anything carrying a file path, and anything naming the tooling, so roughly half the time it lands on a flagged placeholder instead, which the user then has to find and fix. That is a failure on your part. Always write a concrete description of what was actually done.
+
+The flag says which of you got it wrong. `[needs description]` means no description was written at all. `[rewrite description]` means one was written and the screen judged it unfit for a customer invoice, so the rewrite is on you and the message on the error stream says what to change.
 
 Before ending each response, write these session-keyed files in `/tmp/claude-timetrack/`:
 - `description-${CLAUDE_CODE_SESSION_ID}.txt` — one specific sentence about this turn. Rewrite every turn. It is screened before it is recorded: second person, a state or verdict rather than an outcome, and internal draft identifiers are refused outright and fall through to a flagged placeholder. Banned dashes and curly quotes are corrected for you.
@@ -19,7 +21,7 @@ Before ending each response, write these session-keyed files in `/tmp/claude-tim
 1. **Length follows the work. Say what was done, once, then stop.** There is no target count. A short call is a few words; a long build may need a sentence or two. What is banned is padding: adding mechanism, reasoning, findings or counts to make small work look bigger. Most entries land well under 100 characters because most turns are one thing. **255 is a hard cap, never a goal** — the hook and the downstream Intervals import both cut there. Writing to the ceiling is the defect: on 2026-08-12, 22 of one person's 43 entries sat at exactly 255, cut mid-word, averaging 203 characters.
 2. **First person, outcome-focused, readable by a non-engineer.** No file paths, script names, class or method names, version numbers, or selector/CSS detail.
 3. **Never name Claude or any AI**, and never write about the user in the third person. The entry is from their perspective.
-4. **Never ship a placeholder** like `[needs description]` or `[Work Description Needed]`.
+4. **Never ship a placeholder** like `[needs description]`, `[rewrite description]` or `[Work Description Needed]`.
 5. **Past tense, completed work.** "Replaced the Barbie experience products", never "Replacing".
 6. **No AI wording or AI-tell punctuation.** Never mention AI, Claude, an assistant, automation, agents, tools, or prompts. No em-dashes, en-dashes, curly quotes, or ellipses; use plain hyphens and straight quotes.
 7. **No client/project/task prefix.** Do not prepend "FAO Schwarz:" or "on the FAO staging site". The entry is already linked to its task or project. Just state the work.
