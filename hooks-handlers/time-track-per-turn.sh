@@ -121,10 +121,19 @@ if [[ -n "$_optout_dir" ]]; then
 fi
 
 # Person resolution (cannot record without it — not a transient failure).
+#
+# An unrecognised username exits 0 below, so a person missing from this map records nothing
+# and says nothing about it. The install looks healthy, the hook returns cleanly, and the
+# only symptom is an empty timesheet found days later. Verify a new person by querying
+# Apropos for their rows, never by "the hook ran without complaining".
+#
+# markglesne is 10357, read from dbo.Resource: Username markglesne, Active true,
+# IntegrationResourceDisplayID 1188. Do NOT use 828, which is the inactive OLD_markglesne row.
 u="$(printf '%s' "${USERNAME:-${USER:-}}" | tr '[:upper:]' '[:lower:]')"
 case "$u" in
   ericbarone) PERSON=321 ;; joelperez) PERSON=344 ;;
   barrettgoldberg) PERSON=276 ;; calebbarone) PERSON=1298 ;;
+  markglesne) PERSON=10357 ;;
   *) exit 0 ;;
 esac
 
