@@ -220,6 +220,27 @@ amend_entry() {
   fi
 }
 
+# amend_by_start <start_utc> <person> <desc> <expect> - the ledger's counterpart to
+# amend_entry. The repair pass never has an entry id to work with: the ledger is keyed
+# on the entry's start time because the id does not exist yet at the moment a flag is
+# written (see lib/ledger.sh), so Update-TimeDescription.ps1 resolves the row itself
+# from (PersonID, StartTime) via -StartTimeUTC instead. Same ExpectDescription guard,
+# same mock hook, same shape, as amend_entry.
+amend_by_start() {
+  if [[ -n "${APROPOS_AMENDER:-}" ]]; then "$APROPOS_AMENDER" "$@"; return $?; fi
+  local start="$1" person="$2" desc="$3" expect="${4:-}"
+  local script="${APROPOS_SKILL_DIR:-R:/Intranet/ClaudeAI/skills/work-management/time}/Update-TimeDescription.ps1"
+  [[ -f "$script" ]] || return 1
+  local ps; ps="$(apropos_ps_exe)" || return 1
+  if [[ -n "$expect" ]]; then
+    "$ps" -NoProfile -ExecutionPolicy Bypass -File "$script" \
+      -StartTimeUTC "$start" -Description "$desc" -PersonID "$person" -ExpectDescription "$expect" >/dev/null 2>&1
+  else
+    "$ps" -NoProfile -ExecutionPolicy Bypass -File "$script" \
+      -StartTimeUTC "$start" -Description "$desc" -PersonID "$person" >/dev/null 2>&1
+  fi
+}
+
 write_entry() {
   if [[ -n "${APROPOS_WRITER:-}" ]]; then "$APROPOS_WRITER" "$@"; return $?; fi
   local person="$1" desc="$2" wt="$3" task="$4" proj="$5" start="$6"

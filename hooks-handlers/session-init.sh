@@ -17,6 +17,17 @@ if [[ -n "$P" && -f "$P/hooks-handlers/lib/queue.sh" && -f "$P/hooks-handlers/li
   ) >/dev/null 2>&1 || true
 fi
 
+# Once-a-day repair pass over every flagged entry on the machine, not just this
+# session's earlier turns. The per-turn hook owns sweep_due/sweep_prune/repair_pending/
+# sweep_mark; this runs it as a real subprocess with its event piped in as JSON, rather
+# than sourcing it, because that file reads its event from stdin (not an env var, see
+# its own header comment) and ends by exiting, which would exit this hook too if sourced.
+# sweep_due inside it keeps this to once per machine per day even though every
+# concurrent session's start asks for it. Best-effort and silent, like the flush above.
+if [[ -n "$P" && -f "$P/hooks-handlers/time-track-per-turn.sh" ]]; then
+  ( printf '{"hook_event_name":"Sweep"}' | bash "$P/hooks-handlers/time-track-per-turn.sh" ) >/dev/null 2>&1 || true
+fi
+
 [[ -n "$P" && -f "$P/hooks-handlers/convention.md" ]] && cat "$P/hooks-handlers/convention.md"
 
 # Visibility: if entries are still undelivered, surface it so time loss is never

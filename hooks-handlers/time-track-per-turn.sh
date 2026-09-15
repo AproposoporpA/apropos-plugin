@@ -30,6 +30,7 @@ set +e
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/lib/queue.sh"
 source "$HERE/lib/writer.sh"
+source "$HERE/lib/ledger.sh"
 
 TRACK_DIR="${APROPOS_TRACK_DIR:-/tmp/claude-timetrack}"
 QUEUE="${HOME}/.claude/apropos-time/pending.tsv"
@@ -572,6 +573,117 @@ desc_from_transcript() {
   return 1
 }
 
+# THE SELF-REPAIR PASS.
+#
+# A flagged entry has no id: fl_record keeps its start time, its session and its cwd
+# (lib/ledger.sh), because that is all record_turn still has when it writes the flag. To
+# repair one later, point desc_from_transcript at that row's own session and cwd rather
+# than the current turn's, and amend the row by start time instead of by id.
+#
+# _flag_text_for_cwd <ph> <cwd> - reconstructs the exact text record_turn would have
+# written for this folder, so the repair pass has something to pass as -ExpectDescription
+# without the ledger having to carry a copy of the row's current description. Mirrors
+# record_turn's own derivation exactly: the folder name appended, unless it names the
+# tooling or the result would run past the cap, in which case the bare flag stands alone.
+_flag_text_for_cwd() {
+  local ph="$1" cwd="$2" proj desc
+  proj="$(basename "$cwd" 2>/dev/null)"
+  if printf '%s' "$proj" | grep -Eqi "$APROPOS_BANNED"; then proj=""; fi
+  if [[ -n "$proj" && "$proj" != "." && "$proj" != "/" ]]; then
+    desc="$ph $proj"
+    (( ${#desc} > DESC_MAX )) && desc="$ph"
+  else
+    desc="$ph"
+  fi
+  printf '%s' "$desc"
+}
+
+# repair_pending [session_filter] - walk the ledger and try to turn a flagged entry's
+# placeholder into a real description, now that its transcript may hold more than it did
+# when the flag was written. Called once a turn for the running session, so a later turn
+# can repair this SAME session's earlier flags, and once a day for the whole ledger, so a
+# session that has already ended still gets cleaned up (see sweep_due below). With no
+# filter, every row is tried; with one, only that session's rows are.
+#
+# Never invents an attribution: this only ever rewrites a description. A candidate that
+# is empty or is itself a flag is left alone rather than written over a flag, and the row
+# stays pending. Nothing here may cost the turn or the session, so every caller swallows
+# this function's failures; nothing inside it is allowed to propagate either.
+repair_pending() {
+  local filter="${1:-}"
+  local start sess cwd epoch
+  while IFS=$'\t' read -r start sess cwd epoch; do
+    [[ -n "$start" ]] || continue
+    [[ -n "$filter" && "$sess" != "$filter" ]] && continue
+
+    # desc_from_transcript reads the GLOBAL $SID, not an argument, because it derives the
+    # transcript path from the session id it was written for. Point it at THIS row's
+    # session for the call, then restore the caller's own so nothing else in the turn
+    # (or a later row in this same walk) is disturbed.
+    local saved_sid="$SID" candidate
+    SID="$sess"
+    candidate="$(desc_from_transcript "$cwd" 2>/dev/null)"
+    SID="$saved_sid"
+
+    # Nothing usable yet, or the transcript still only yields another flag: leave the row
+    # for the next pass rather than writing a flag over a flag.
+    [[ -n "${candidate//[[:space:]]/}" ]] || continue
+    _desc_is_placeholder "$candidate" && continue
+
+    # Which flag the row carries is not recorded either, so try both, and let
+    # Update-TimeDescription.ps1's own exit codes tell a wrong guess apart from a row a
+    # person has already corrected: 0 amended, 2 the row says something other than what
+    # was offered, 1 anything else (no such row yet, more than one match, unreachable).
+    local exp_none exp_rej rc
+    exp_none="$(_flag_text_for_cwd "$DESC_PH_NONE" "$cwd")"
+    exp_rej="$(_flag_text_for_cwd "$DESC_PH_REJECTED" "$cwd")"
+
+    amend_by_start "$start" "$PERSON" "$candidate" "$exp_none"; rc=$?
+    if [[ "$rc" == "0" ]]; then fl_clear "$start"; continue; fi
+    if [[ "$rc" == "2" ]]; then
+      amend_by_start "$start" "$PERSON" "$candidate" "$exp_rej"; rc=$?
+      if [[ "$rc" == "0" ]]; then fl_clear "$start"; continue; fi
+    fi
+    # rc 2 here means the row matches NEITHER flag shape: a person already corrected it,
+    # so it is no longer ours to repair, and the row is cleared rather than retried
+    # forever. Any other outcome (no such row yet, more than one match, the database
+    # unreachable) is not that signal, so the row is left pending and tried again later.
+    [[ "$rc" == "2" ]] && fl_clear "$start"
+  done < <(fl_pending)
+}
+
+# Once-a-machine-per-day guard for the whole-ledger sweep. A stamp file rather than
+# per-session state, because Barrett runs several sessions at once and every one starting
+# would otherwise all run the sweep together.
+APROPOS_SWEEP_STAMP="${APROPOS_SWEEP_STAMP:-$HOME/.claude/apropos-time/last-sweep}"
+
+sweep_due() {
+  [[ -s "$APROPOS_SWEEP_STAMP" ]] || return 0
+  local last; last="$(cat "$APROPOS_SWEEP_STAMP" 2>/dev/null)"
+  [[ "$last" == "$(date -u +%Y-%m-%d)" ]] && return 1
+  return 0
+}
+
+sweep_mark() {
+  mkdir -p "$(dirname "$APROPOS_SWEEP_STAMP")" 2>/dev/null || true
+  date -u +%Y-%m-%d > "$APROPOS_SWEEP_STAMP" 2>/dev/null || true
+}
+
+# How long a pending row is worth retrying. Past this, nothing left in the transcript is
+# going to change, and the row would otherwise sit in the ledger forever, retried on
+# every turn and every day's sweep for no gain.
+APROPOS_SWEEP_DAYS="${APROPOS_SWEEP_DAYS:-7}"
+
+sweep_prune() {
+  local cutoff; cutoff=$(( $(date -u +%s) - APROPOS_SWEEP_DAYS * 86400 ))
+  local start sess cwd epoch
+  while IFS=$'\t' read -r start sess cwd epoch; do
+    [[ -n "$start" ]] || continue
+    [[ "$epoch" =~ ^[0-9]+$ ]] || continue
+    (( epoch < cutoff )) && fl_clear "$start"
+  done < <(fl_pending)
+}
+
 # task_wt_lookup <task> -> prints the worktype last recorded against that task.
 task_wt_lookup() {
   local t="$1" k v
@@ -686,6 +798,12 @@ record_turn() {
     fi
   fi
   DESC="${DESC:0:$DESC_MAX}"
+
+  # Now that this turn's own description is settled, take the chance to revisit any flag
+  # THIS session left behind earlier. Its transcript holds more now than it did when the
+  # flag was written, so a candidate that did not exist then might exist now. Never
+  # allowed to cost the turn: every failure inside is swallowed.
+  repair_pending "$SID" 2>/dev/null || true
 
   # Optional sticky task/project. Resolved BEFORE the worktype, because the worktype can
   # be inherited from the task.
@@ -842,6 +960,13 @@ record_turn() {
 
   if [[ $MERGED -eq 0 && $DEDUP -eq 0 ]]; then
     q_enqueue "$QUEUE" "$PERSON" "$DESC" "$WT" "$TASK" "$PROJ" "$START"
+    # A flagged entry is remembered so a later turn, or the daily sweep, can try again with
+    # the transcript as it finally stands. Keyed on the start time because the entry has no
+    # id yet: this call only enqueues, and the id is parsed later inside write_entry, which
+    # knows nothing about the session or the directory.
+    if _desc_is_placeholder "$DESC"; then
+      fl_record "$START" "$SID" "$basecwd" "$(date -u +%s)" || true
+    fi
     printf '%s|%s\n' "$NOW" "$SEG" > "$lastf"
     # The day's tally, written HERE rather than beside the catch-all announcement,
     # because only this branch actually creates an entry. At the announcement it also
@@ -901,6 +1026,19 @@ case "$EVENT" in
     START="$(start_from_stamp "$startf")"
     record_turn "$START"
     rm -f "$startf" 2>/dev/null || true
+    ;;
+  Sweep)
+    # Once-a-day repair pass across the WHOLE ledger, triggered from session-init.sh's
+    # SessionStart path. That path runs this file as a real subprocess with the event
+    # piped in as JSON, rather than sourcing it: this script reads its event from stdin,
+    # not from the environment (see the header comment on EVENT), and ends by exiting, so
+    # sourcing it would exit session-init.sh's own hook too. sweep_due keeps this to once
+    # per machine per day even though every concurrent session's start asks for it.
+    if sweep_due; then
+      sweep_prune
+      repair_pending ""
+      sweep_mark
+    fi
     ;;
   *)
     # UserPromptSubmit. Recovery first: a leftover description file means Stop did
