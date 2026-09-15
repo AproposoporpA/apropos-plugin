@@ -4,7 +4,7 @@
 # The recorder knows an entry is flagged at the moment it writes it, and then forgets.
 # Once the activity closes, nothing can find that entry again, so it stays flagged until
 # a person cleans the day by hand. This records the pairing that makes a later repair
-# possible: the entry id, and the session and working directory whose transcript holds
+# possible: the entry's start time, and the session and working directory whose transcript holds
 # what the turn actually did.
 #
 # Local to the machine, like the rest of the plugin's state, because the transcript it
@@ -34,7 +34,7 @@ fl_record() {
 # fl_pending, every entry still awaiting repair, one per line, tab separated.
 fl_pending() { _fl_init; cat "$APROPOS_LEDGER_FILE"; }
 
-# fl_clear <entry_id>, drop an entry once it has been repaired or given up on.
+# fl_clear <start_utc>, drop an entry once it has been repaired or given up on.
 fl_clear() {
   _fl_init
   local id="$1" tmp
