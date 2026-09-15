@@ -30,6 +30,7 @@ set +e
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/lib/queue.sh"
 source "$HERE/lib/writer.sh"
+source "$HERE/lib/ledger.sh"
 
 TRACK_DIR="${APROPOS_TRACK_DIR:-/tmp/claude-timetrack}"
 QUEUE="${HOME}/.claude/apropos-time/pending.tsv"
@@ -842,6 +843,13 @@ record_turn() {
 
   if [[ $MERGED -eq 0 && $DEDUP -eq 0 ]]; then
     q_enqueue "$QUEUE" "$PERSON" "$DESC" "$WT" "$TASK" "$PROJ" "$START"
+    # A flagged entry is remembered so a later turn, or the daily sweep, can try again with
+    # the transcript as it finally stands. Keyed on the start time because the entry has no
+    # id yet: this call only enqueues, and the id is parsed later inside write_entry, which
+    # knows nothing about the session or the directory.
+    if _desc_is_placeholder "$DESC"; then
+      fl_record "$START" "$SID" "$basecwd" "$(date -u +%s)" || true
+    fi
     printf '%s|%s\n' "$NOW" "$SEG" > "$lastf"
     # The day's tally, written HERE rather than beside the catch-all announcement,
     # because only this branch actually creates an entry. At the announcement it also

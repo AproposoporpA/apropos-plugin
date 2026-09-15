@@ -14,16 +14,21 @@ APROPOS_LEDGER_FILE="${APROPOS_LEDGER_FILE:-$HOME/.claude/apropos-time/flagged.t
 
 _fl_init() { mkdir -p "$(dirname "$APROPOS_LEDGER_FILE")" 2>/dev/null || true; [[ -f "$APROPOS_LEDGER_FILE" ]] || : > "$APROPOS_LEDGER_FILE"; }
 
-# fl_record <entry_id> <session_id> <cwd> <epoch>
+# fl_record <start_utc> <session_id> <cwd> <epoch>
+# Keyed on the entry's start time, not its id. The id does not exist yet when the flag is
+# written: record_turn enqueues and returns, and the id is only parsed out later inside
+# write_entry, which knows nothing about the session. The start time enqueued here becomes
+# the entry's StartTime unchanged, so person plus start identifies the row.
+#
 # Recording the same entry twice keeps one row: a turn can flag the same open entry
 # repeatedly, and a ledger that grew a row each time would make the sweep do the same
 # work over and over.
 fl_record() {
   _fl_init
-  local id="$1"
-  [[ "$id" =~ ^[0-9]+$ ]] || return 1
-  fl_clear "$id"
-  printf '%s\t%s\t%s\t%s\n' "$id" "$2" "$3" "$4" >> "$APROPOS_LEDGER_FILE"
+  local key="$1"
+  [[ -n "${key//[[:space:]]/}" ]] || return 1
+  fl_clear "$key"
+  printf '%s\t%s\t%s\t%s\n' "$key" "$2" "$3" "$4" >> "$APROPOS_LEDGER_FILE"
 }
 
 # fl_pending, every entry still awaiting repair, one per line, tab separated.
