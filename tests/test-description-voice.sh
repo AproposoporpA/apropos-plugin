@@ -37,7 +37,14 @@ desc_of(){ printf '%s' "$1" | awk -F'|' '{print $2}'; }
 last(){ desc_of "$(tail -1 "$WRITER_LOG")"; }
 
 s=0
-next(){ s=$((s+1)); : > "$WRITER_LOG"; printf '28682' > "$TT/task-v$s.txt"; printf '59' > "$TT/worktype-v$s.txt"; }
+# Each case is an independent turn, so each one gets its own task and therefore its own
+# activity key. Sharing one key across every case made each case contend with the last:
+# the mock writer returns no entry id, so the claim the previous case left was never
+# resolved, and the next case waited out APROPOS_CLAIM_WAIT_SECS before giving up. That
+# is 25 seconds a case, and the file stopped finishing at all. The waiting is correct
+# behaviour for two real sessions on one activity (#30903) and is covered by
+# test-concurrent-first-open.sh. It is not what this file is testing.
+next(){ s=$((s+1)); : > "$WRITER_LOG"; printf '%s' "$((90000+s))" > "$TT/task-v$s.txt"; printf '59' > "$TT/worktype-v$s.txt"; }
 
 # 1. Second person never reaches the field.
 next; said "v$s" "The date moved to a tentative 9/8 and your three tasks are marked complete."
